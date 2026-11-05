@@ -1,5 +1,7 @@
 ﻿# 757 LNAV/VNAV Plus
 
+ NEW request to ALL developer who wanna help this program:LNAV need some update，if anyone make the LNAV better，please contact me:Gongqijun823@outlook.com
+
 **An unofficial X-Plane plugin that improves LNAV and VNAV guidance for the FlightFactor 757/767 — without touching SASL, the aircraft files, or the FF avionics plugin.**
 
 > 这是一个独立的 X-Plane 插件，用来增强 FlightFactor 757/767 的 LNAV / VNAV 表现。
