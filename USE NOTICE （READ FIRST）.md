@@ -1,3 +1,4 @@
+NOTICE: the use advise is outdate,please follow doc/usage
 # 使用说明（中文 / English）
 
 757 LNAV/VNAV Plus — FlightFactor 757/767 的独立 LNAV/VNAV 增强插件。
