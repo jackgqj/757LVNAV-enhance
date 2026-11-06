@@ -1,4 +1,4 @@
-﻿# 757 LNAV/VNAV Plus
+﻿# 757/767LNAV/VNAV Plus
 
 **An unofficial X-Plane plugin that improves LNAV and VNAV guidance for the FlightFactor 757/767 — without touching SASL, the aircraft files, or the FF avionics plugin.**
 
