@@ -1,6 +1,7 @@
 #pragma once
 
 #include "cdu_parser.h"
+#include "cifp_parser.h"
 #include "nav_database.h"
 #include "route_model.h"
 
@@ -33,6 +34,11 @@ public:
     // a MOD -> ACT transition (EXEC), a changed active route name, or a manual
     // request.  Route edits while the page shows MOD never trigger a scan.
     void setScanOnExecOnly(bool enabled) { scanOnExecOnly_ = enabled; }
+
+    // Fills rfArc geometry on legs that match a CIFP RF row.  Used internally
+    // by buildSnapshot(); also exposed so RouteReader can annotate its
+    // rteData-based snapshot with the same nav/cifp databases.
+    void annotateRfArcs(RouteSnapshot& route) { AnnotateRfArcs(route, cifp_, nav_); }
 
     const RouteSnapshot& route() const { return route_; }
     const std::string& lastError() const { return lastError_; }
@@ -86,6 +92,7 @@ private:
     XPLMDataRef magVar_ = nullptr;
 
     NavDatabase nav_;
+    CifpDatabase cifp_;
     bool navRootSet_ = false;
 
     ScanState state_ = ScanState::Idle;

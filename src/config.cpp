@@ -60,17 +60,22 @@ bool parseInt(const std::string& v, int& out) {
 
 void Config::clampValues() {
     lnavGain = std::clamp(lnavGain, 0.0, 2.0);
-    lnavMaxInterceptDeg = std::clamp(lnavMaxInterceptDeg, 5.0, 45.0);
+    // 25 deg was the pre-Boeing-capture default; the capture model uses 30.
+    if (std::abs(lnavMaxInterceptDeg - 25.0) < 1e-6) lnavMaxInterceptDeg = 30.0;
+    lnavMaxInterceptDeg = std::clamp(lnavMaxInterceptDeg, 10.0, 45.0);
+    lnavDirectInterceptDeg = std::clamp(lnavDirectInterceptDeg, 15.0, 60.0);
+    lnavXtkBlendNm = std::clamp(lnavXtkBlendNm, 0.5, 10.0);
     lnavTurnLeadFactor = std::clamp(lnavTurnLeadFactor, 0.5, 3.0);
     lnavMaxBankDeg = std::clamp(lnavMaxBankDeg, 10.0, 35.0);
     lnavMaxCourseErrorDeg = std::clamp(lnavMaxCourseErrorDeg, 20.0, 90.0);
-    lnavInterceptDistanceNm = std::clamp(lnavInterceptDistanceNm, 0.1, 5.0);
+    lnavRolloutLeadDeg = std::clamp(lnavRolloutLeadDeg, 0.0, 10.0);
     lnavMinSpeedKts = std::clamp(lnavMinSpeedKts, 30.0, 150.0);
     lnavMinDistanceNm = std::clamp(lnavMinDistanceNm, 0.0, 1.0);
     lnavRollGain = std::clamp(lnavRollGain, 0.0, 1.0);
     lnavMaxRollCorrectionDeg = std::clamp(lnavMaxRollCorrectionDeg, 0.0, 15.0);
     lnavRollRateLimitDegPerSec = std::clamp(lnavRollRateLimitDegPerSec, 0.2, 15.0);
     lnavRollSmoothingTauSec = std::clamp(lnavRollSmoothingTauSec, 0.02, 1.0);
+    rnpNm = std::clamp(rnpNm, 0.0, 10.0);
 
     vnavVsGain = std::clamp(vnavVsGain, 0.0, 2.0);
     vnavAccelGain = std::clamp(vnavAccelGain, 0.0, 0.02);
@@ -116,16 +121,21 @@ bool Config::load(const std::string& path) {
         else if (key == "enable_lnav_fd_roll") { if (parseBool(value, b)) enableLnavFdRoll = b; }
         else if (key == "lnav_gain") { if (parseDouble(value, d)) lnavGain = d; }
         else if (key == "lnav_max_intercept_deg") { if (parseDouble(value, d)) lnavMaxInterceptDeg = d; }
+        else if (key == "lnav_direct_intercept_deg") { if (parseDouble(value, d)) lnavDirectInterceptDeg = d; }
+        else if (key == "lnav_xtk_blend_nm") { if (parseDouble(value, d)) lnavXtkBlendNm = d; }
         else if (key == "lnav_turn_lead_factor") { if (parseDouble(value, d)) lnavTurnLeadFactor = d; }
         else if (key == "lnav_max_bank_deg") { if (parseDouble(value, d)) lnavMaxBankDeg = d; }
         else if (key == "lnav_max_course_error_deg") { if (parseDouble(value, d)) lnavMaxCourseErrorDeg = d; }
-        else if (key == "lnav_intercept_distance_nm") { if (parseDouble(value, d)) lnavInterceptDistanceNm = d; }
+        else if (key == "lnav_rollout_lead_deg") { if (parseDouble(value, d)) lnavRolloutLeadDeg = d; }
+        else if (key == "lnav_rf_enabled") { if (parseBool(value, b)) lnavRfEnabled = b; }
         else if (key == "lnav_min_speed_kts") { if (parseDouble(value, d)) lnavMinSpeedKts = d; }
         else if (key == "lnav_min_distance_nm") { if (parseDouble(value, d)) lnavMinDistanceNm = d; }
         else if (key == "lnav_roll_gain") { if (parseDouble(value, d)) lnavRollGain = d; }
         else if (key == "lnav_max_roll_correction_deg") { if (parseDouble(value, d)) lnavMaxRollCorrectionDeg = d; }
         else if (key == "lnav_roll_rate_limit_deg_s") { if (parseDouble(value, d)) lnavRollRateLimitDegPerSec = d; }
         else if (key == "lnav_roll_smoothing_tau_s") { if (parseDouble(value, d)) lnavRollSmoothingTauSec = d; }
+        else if (key == "rnp_enabled") { if (parseBool(value, b)) rnpEnabled = b; }
+        else if (key == "rnp_nm") { if (parseDouble(value, d)) rnpNm = d; }
         else if (key == "vnav_vs_gain") { if (parseDouble(value, d)) vnavVsGain = d; }
         else if (key == "vnav_accel_gain") { if (parseDouble(value, d)) vnavAccelGain = d; }
         else if (key == "vnav_max_correction_deg") { if (parseDouble(value, d)) vnavMaxCorrectionDeg = d; }
@@ -136,6 +146,10 @@ bool Config::load(const std::string& path) {
         else if (key == "vnav_max_alt_delta_ft") { if (parseDouble(value, d)) vnavMaxAltDeltaFt = d; }
         else if (key == "vnav_augment_speed_mode") { if (parseBool(value, b)) vnavAugmentSpeedMode = b; }
         else if (key == "vnav_respect_selected_alt") { if (parseBool(value, b)) vnavRespectSelectedAlt = b; }
+        else if (key == "vnav_priority") { if (parseBool(value, b)) vnavPriority = b; }
+        else if (key == "vnav_speed_limits_enabled") { if (parseBool(value, b)) vnavSpeedLimitsEnabled = b; }
+        else if (key == "vnav_speed_decel_factor_nm_per_10kt") { if (parseDouble(value, d)) vnavSpeedDecelFactorNmPer10Kt = d; }
+        else if (key == "vnav_hard_250_below_ft") { if (parseDouble(value, d)) vnavHard250BelowFt = d; }
         else if (key == "cdu_rescan_interval_s") { if (parseDouble(value, d)) cduRescanIntervalSec = d; }
         else if (key == "cdu_periodic_rescan") { if (parseBool(value, b)) cduPeriodicRescan = b; }
         else if (key == "cdu_scan_on_exec_only") { if (parseBool(value, b)) cduScanOnExecOnly = b; }
@@ -186,16 +200,21 @@ bool Config::save(const std::string& path) const {
 
     out << "lnav_gain=" << lnavGain << "\n";
     out << "lnav_max_intercept_deg=" << lnavMaxInterceptDeg << "\n";
+    out << "lnav_direct_intercept_deg=" << lnavDirectInterceptDeg << "\n";
+    out << "lnav_xtk_blend_nm=" << lnavXtkBlendNm << "\n";
     out << "lnav_turn_lead_factor=" << lnavTurnLeadFactor << "\n";
     out << "lnav_max_bank_deg=" << lnavMaxBankDeg << "\n";
     out << "lnav_max_course_error_deg=" << lnavMaxCourseErrorDeg << "\n";
-    out << "lnav_intercept_distance_nm=" << lnavInterceptDistanceNm << "\n";
+    out << "lnav_rollout_lead_deg=" << lnavRolloutLeadDeg << "\n";
+    out << "lnav_rf_enabled=" << (lnavRfEnabled ? 1 : 0) << "\n";
     out << "lnav_min_speed_kts=" << lnavMinSpeedKts << "\n";
     out << "lnav_min_distance_nm=" << lnavMinDistanceNm << "\n";
     out << "lnav_roll_gain=" << lnavRollGain << "\n";
     out << "lnav_max_roll_correction_deg=" << lnavMaxRollCorrectionDeg << "\n";
     out << "lnav_roll_rate_limit_deg_s=" << lnavRollRateLimitDegPerSec << "\n";
-    out << "lnav_roll_smoothing_tau_s=" << lnavRollSmoothingTauSec << "\n\n";
+    out << "lnav_roll_smoothing_tau_s=" << lnavRollSmoothingTauSec << "\n";
+    out << "rnp_enabled=" << (rnpEnabled ? 1 : 0) << "\n";
+    out << "rnp_nm=" << rnpNm << "\n\n";
 
     out << "vnav_vs_gain=" << vnavVsGain << "\n";
     out << "vnav_accel_gain=" << vnavAccelGain << "\n";
@@ -206,7 +225,11 @@ bool Config::save(const std::string& path) const {
     out << "vnav_min_distance_nm=" << vnavMinDistanceNm << "\n";
     out << "vnav_max_alt_delta_ft=" << vnavMaxAltDeltaFt << "\n";
     out << "vnav_augment_speed_mode=" << (vnavAugmentSpeedMode ? 1 : 0) << "\n";
-    out << "vnav_respect_selected_alt=" << (vnavRespectSelectedAlt ? 1 : 0) << "\n\n";
+    out << "vnav_respect_selected_alt=" << (vnavRespectSelectedAlt ? 1 : 0) << "\n";
+    out << "vnav_priority=" << (vnavPriority ? 1 : 0) << "\n";
+    out << "vnav_speed_limits_enabled=" << (vnavSpeedLimitsEnabled ? 1 : 0) << "\n";
+    out << "vnav_speed_decel_factor_nm_per_10kt=" << vnavSpeedDecelFactorNmPer10Kt << "\n";
+    out << "vnav_hard_250_below_ft=" << vnavHard250BelowFt << "\n\n";
 
     out << "cdu_rescan_interval_s=" << cduRescanIntervalSec << "\n";
     out << "cdu_periodic_rescan=" << (cduPeriodicRescan ? 1 : 0) << "\n";

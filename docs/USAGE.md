@@ -53,9 +53,11 @@
 | `Aircraft: FF757/767` | 是否正确识别为 FF 机模 |
 | `AP : mode / roll / pitch / vnavPhase` | FF757 原始自动驾驶模式值 |
 | `engaged / lnavMode / vnavMode` | 插件识别到的 AP、LNAV、VNAV 状态 |
-| `LNAV : ACTIVE src=ROUTE` | LNAV 正在写入；`src` 表示来源（`ROUTE` / `ROUTE/SYNTH` / GPS CDI） |
+| `LNAV : ACTIVE src=ROUTE` | LNAV 正在写入；`src` 表示来源（`ROUTE` / `ROUTE/SYNTH` / `RF ARC` / GPS CDI） |
 | `xtk / dist / base / target / corr` | 偏航距、距下一航点距离、基准航向、目标航向、修正量 |
+| `turn=..%` / `RFarc=..%` | 转弯进度；RF 定半径弧段时显示弧线进度 |
 | `active #n -> next #n` | 当前生效航点与下一航点序号 |
+| `RNP=.. ANP(trk)=.. OK / NAV UNABLE RNP` | 777 式 RNP 监视：RNP 为当前飞行阶段要求的 95% 精度（巡航 2.0 / 终端区 1.0 / 最后进近 0.3 NM）。`ANP(trk)` 是**航迹保持误差**的代理量（2×低通平均 |偏航距|，RF 弧段用径向误差），参照物是当前航段而非飞机真实位置，因此与真实 FMS 的 ANP（GPS/IRS 定位误差）含义不同：切航道或大转弯时会短时上升。`ANP(trk)` 持续超过 RNP 约 2 秒变为琥珀色 `NAV UNABLE RNP` 并写入 Log.txt，回到 0.8×RNP 以内自动解除。仅提示，不影响操纵 |
 | `VNAV : PTH ACTIVE / SPD STBY` | 首词为 FF757 当前 VNAV 子模式（`SPD` / `PTH`），对应 PFD 上的 FMA；`ACTIVE` = 正在修正垂直路径，`STBY` = 已识别但不干预 |
 | `reqVS / vs / corr` | 所需升降率、实际升降率、俯仰修正量 |
 | `Route : CDU bound=1 valid=1 legs=... wpts=...` | 航路来源与解析结果；`valid=1` 表示航路可用 |
@@ -65,6 +67,8 @@
 
 - **`SPD STBY` / `PTH STBY` 是正常的待命状态**：前者是 VNAV SPD（爬升/速度保持，靠俯仰控速），后者通常是 VNAV PTH 但正保持 MCP 高度、尚未到 TOD 或误差在死区内。插件只是不写俯仰，模式已经被识别。
 - 只有 `VNAV : ACTIVE` 时才会看到俯仰修正。
+- **下降（DES）时插件独占俯仰**：机模自己的 VNAV 和插件都写同一个 FD 俯仰 dataref，逐帧互相覆盖就会"夺权"抖动。插件在拿到有效垂直路径的那一帧就锁定优先权（状态窗 notes 显示 `plugin pitch priority`），持续写入，直到垂直路径失效连续约 2 秒才释放。想让机模优先就把 `vnav_priority=0`。
+- **RF 定半径弧段（如西雅图 RNAV RNP 进近）**：插件从 X-Plane 的 CIFP 程序数据库解析真实的圆弧（圆心、半径、转向），沿切线航向平滑跟踪整段弧，而不是像原版 FF757 那样飞成多边形。状态窗 `src` 显示 `RF ARC`，日志会给出半径、剩余弧度数和当前地速所需坡度；若所需坡度超过 `lnav_max_bank_deg` 会标注提醒（弧仍会跟踪，但过小的半径在高速下可能保持不住）。可用 `lnav_rf_enabled=0` 关闭，退回原版透传。
 
 ## 4. 航路扫描规则
 
@@ -199,9 +203,11 @@ It does not modify SASL, aircraft files, or the FF avionics plugin.
 | `Aircraft: FF757/767` | Aircraft detected correctly |
 | `AP : mode / roll / pitch / vnavPhase` | Raw FF757 autopilot mode values |
 | `engaged / lnavMode / vnavMode` | States detected by the plugin |
-| `LNAV : ACTIVE src=ROUTE` | LNAV is writing; `src` is the source (`ROUTE` / `ROUTE/SYNTH` / GPS CDI) |
+| `LNAV : ACTIVE src=ROUTE` | LNAV is writing; `src` is the source (`ROUTE` / `ROUTE/SYNTH` / `RF ARC` / GPS CDI) |
 | `xtk / dist / base / target / corr` | Cross-track, distance to fix, base course, target course, correction |
+| `turn=..%` / `RFarc=..%` | Turn progress; on RF constant-radius legs this is the arc progress |
 | `active #n -> next #n` | Active and next waypoint indices |
+| `RNP=.. ANP(trk)=.. OK / NAV UNABLE RNP` | 777-style RNP monitoring: RNP is the 95% accuracy requirement of the flight phase (enroute 2.0 / terminal 1.0 / final 0.3 NM). `ANP(trk)` is a **track-keeping** proxy (2x the low-passed mean |cross-track|, or the radial error on RF arcs) measured against the active leg, not the aircraft's true position - so it differs from the real FMS ANP (the GPS/IRS position-error estimate) and rises briefly during captures and large turns. If it exceeds RNP for ~2 s the line turns amber `NAV UNABLE RNP` and the event is logged; it clears below 0.8xRNP. Advisory only - steering is never degraded |
 | `VNAV : PTH ACTIVE / SPD STBY` | First word is the FF757 VNAV submode (`SPD` / `PTH`) matching the PFD FMA; `ACTIVE` = correcting the vertical path, `STBY` = recognised but hands off |
 | `reqVS / vs / corr` | Required VS, actual VS, pitch correction |
 | `Route : CDU bound=1 valid=1 legs=... wpts=...` | Route source and parse result; `valid=1` means usable |
@@ -214,6 +220,21 @@ Key points:
   holding the MCP altitude, before TOD, or inside the deadband. The mode is
   recognised; the plugin simply writes no pitch.
 - Pitch correction is only applied when the window shows `VNAV : ACTIVE`.
+- **During DES the plugin owns pitch.** The FF757's own VNAV and the plugin
+  write the same FD pitch dataref, so letting both run produces the visible
+  pitch tug-of-war. The plugin latches priority on the first frame with a
+  valid vertical path (the notes show `plugin pitch priority`), keeps writing
+  and releases only after ~2 s of inactivity. Set `vnav_priority=0` to hand
+  priority back to the FF757.
+- **RF constant-radius legs** (e.g. the Seattle RNAV RNP approaches): the plugin
+  resolves the true arc from X-Plane's CIFP procedure database (centre, radius,
+  turn direction) and tracks the tangent course smoothly along the whole arc
+  instead of the stock FF757's polygon chain. The status window shows
+  `src=RF ARC`; the log reports radius, degrees remaining and the bank angle
+  the published radius needs at the current groundspeed (flagged when it
+  exceeds `lnav_max_bank_deg` - the arc is still tracked, but a very tight
+  radius cannot be held at high speed). Set `lnav_rf_enabled=0` to pass RF
+  legs through to the stock behaviour.
 
 ## 4. Route scanning rules
 

@@ -112,6 +112,7 @@ int main() {
 
     Config cfg;
     cfg.lnavMaxCourseErrorDeg = 90.0;
+    cfg.vnavSpeedLimitsEnabled = false;   // legacy VNAV path tests run without speed limits
     CHECK(cfg.vnavPitchModeA == 0 && cfg.vnavPitchModeB == 6 &&
           cfg.vnavPitchModeC == 5, "observed VNAV pitch modes are enabled");
     Guidance guidance;
@@ -423,6 +424,498 @@ int main() {
         CHECK_NEAR(vn.requiredVsFpm, 0.0, 1.0, "MCP hold commands zero VS");
         CHECK_NEAR(vn.correctionDeg, 0.0, 1e-6, "MCP hold commands no pitch");
         CHECK(vn.note.find("MCP") != std::string::npos, "MCP hold note");
+    }
+
+    // Boeing course capture (777): |xtk| beyond the blend distance commands a
+    // constant 30 deg intercept; small offsets home direct to the fix, so the
+    // angle is atan(xtk / distance-to-fix) and decays as the offset closes.
+    // A long-range S-turn from a small offset must never happen.
+    {
+        Guidance g5;
+        RouteSnapshot r = MakeRoute();
+        CdiInput cdi;
+
+        // Large offset: full constant intercept regardless of distance.
+        AircraftState s = MakeState(0.1, 0.5, 90.0);      // ~6 nm left of course
+        LnavResult ln = g5.computeLnav(s, r, cdi, cfg);
+        CHECK_NEAR(ln.desiredCourseMagDeg, 120.0, 0.1,
+                   "large xtk commands the full 30 deg intercept");
+
+        // Small offset 20 nm out: pure direct-to-fix homing, ~3.6 deg.
+        Guidance g5b;
+        s = MakeState(0.02083, 0.6667, 90.0);             // ~1.25 nm off, 20 nm to go
+        ln = g5b.computeLnav(s, r, cdi, cfg);
+        const double mid = ln.desiredCourseMagDeg - 90.0;
+        CHECK(mid > 1.0 && mid < 6.0,
+              "1.25 nm offset 20 nm out homes to the fix, no forced intercept");
+
+        // Small offset far away: even gentler.
+        Guidance g5c;
+        s = MakeState(0.0083, 0.0, 90.0);                 // ~0.5 nm off, 60 nm to go
+        ln = g5c.computeLnav(s, r, cdi, cfg);
+        const double farErr = ln.desiredCourseMagDeg - 90.0;
+        CHECK(farErr > 0.2 && farErr < 1.2,
+              "0.5 nm offset 60 nm out is a fraction of a degree");
+
+        // Hand-over band: at 3 nm the constant capture angle is fully applied.
+        Guidance g5d;
+        s = MakeState(0.05, 0.6667, 90.0);                // 3 nm off, 20 nm to go
+        ln = g5d.computeLnav(s, r, cdi, cfg);
+        const double bandErr = ln.desiredCourseMagDeg - 90.0;
+        CHECK(bandErr > 26.0 && bandErr < 31.0,
+              "3 nm offset hands over to the 30 deg capture angle");
+    }
+
+    // Near-fix behaviour: homing aims at the fix, so the last mile can demand
+    // a larger angle; the 45 deg cap still applies.
+    {
+        Guidance g6;
+        RouteSnapshot r = MakeRoute();
+        CdiInput cdi;
+        AircraftState s = MakeState(0.0083, 0.983, 90.0);  // ~1 nm to BBB
+        s.gsKts = 160.0;                                   // tangent < 1 nm, no arc
+        LnavResult ln = g6.computeLnav(s, r, cdi, cfg);
+        CHECK(ln.active, "near-fix intercept active");
+        const double err = ln.desiredCourseMagDeg - 90.0;
+        CHECK(err > 22.0 && err < 32.0,
+              "near-fix homing aims at the fix (atan of offset over distance)");
+    }
+
+    // Roll-out lead: on the last few degrees of the arc the target is frozen
+    // on the outbound course so the AP levels out on course; progress reads
+    // 100% while frozen.  Before the freeze window the arc is still tracked.
+    {
+        Guidance g7;
+        Config c7 = cfg;
+        RouteSnapshot r = MakeRoute();          // left turn 090 -> 000 at BBB
+        CdiInput cdi;
+
+        // ~1 deg before the outbound tangent point T2 (inside the 3 deg lead).
+        AircraftState s = MakeState(0.0804, 0.9999, 355.0);
+        LnavResult ln = g7.computeLnav(s, r, cdi, c7);
+        CHECK(ln.active, "rollout-lead state active");
+        CHECK(std::abs(normalize180(ln.desiredCourseMagDeg)) < 0.5,
+              "target frozen on the outbound course inside the lead window");
+        CHECK(ln.turnProgress >= 0.999, "progress reads complete while frozen");
+
+        AircraftState s2 = MakeState(0.0688, 0.9988, 15.0);   // ~80 deg turned
+        ln = g7.computeLnav(s2, r, cdi, c7);
+        CHECK(ln.active, "mid-arc state active");
+        CHECK(std::abs(normalize180(ln.desiredCourseMagDeg) - 10.0) < 2.5,
+              "mid-arc target still follows the tangent course");
+    }
+
+    // --- RNP / ANP monitoring (777 FMC logic) ---
+    // Phase auto-selection: enroute RNP 2.0, terminal RNP 1.0 within 30 NM of
+    // the destination, approach RNP 0.3 within 8 NM.  distToDest is the
+    // remaining distance to the active fix plus the rest of the route.
+    {
+        Guidance g3;
+        CdiInput cdi;
+
+        RouteSnapshot far = MakeRoute();     // BBB->CCC = 30 nm
+        AircraftState s = MakeState(0.0, 0.5, 90.0);   // 30 + 30 = 60 nm out
+        LnavResult ln = g3.computeLnav(s, far, cdi, cfg);
+        CHECK_NEAR(ln.rnpNm, 2.0, 1e-9, "enroute RNP 2.0 far from destination");
+
+        RouteSnapshot nearR = MakeRoute();
+        nearR.wpts[2].lat = 0.0;             // BBB->CCC = 6 nm
+        nearR.wpts[2].lon = 1.1;
+        s = MakeState(0.0, 0.9, 90.0);       // 6 + 6 = 12 nm out
+        ln = g3.computeLnav(s, nearR, cdi, cfg);
+        CHECK_NEAR(ln.rnpNm, 1.0, 1e-9, "terminal RNP 1.0 within 30 nm");
+        s = MakeState(0.0, 0.98, 90.0);      // 1.2 + 6 = 7.2 nm out
+        ln = g3.computeLnav(s, nearR, cdi, cfg);
+        CHECK_NEAR(ln.rnpNm, 0.3, 1e-9, "approach RNP 0.3 within 8 nm");
+    }
+
+    // ANP is a 95% containment proxy (2 x filtered |xtk|).  Sustained ANP >
+    // RNP raises the alert; clearing needs a clean margin (hysteresis), like
+    // the FMC's NAV UNABLE RNP message.
+    {
+        Guidance g4;
+        Config c4 = cfg;
+        c4.rnpNm = 0.5;                      // force a tight requirement
+        RouteSnapshot r = MakeRoute();
+        CdiInput cdi;
+
+        bool raised = false;
+        for (int i = 0; i < 60; ++i) {
+            AircraftState s = MakeState(0.05, 0.5, 90.0);   // ~3 nm off course
+            LnavResult ln = g4.computeLnav(s, r, cdi, c4);
+            raised = ln.rnpUnable;
+        }
+        CHECK(raised, "sustained ANP > RNP raises NAV UNABLE RNP");
+
+        bool cleared = false;
+        for (int i = 0; i < 260; ++i) {
+            AircraftState s = MakeState(0.001, 0.5, 90.0);  // back on track
+            LnavResult ln = g4.computeLnav(s, r, cdi, c4);
+            cleared = !ln.rnpUnable;
+        }
+        CHECK(cleared, "ANP back inside 0.8*RNP clears the alert");
+    }
+
+    // --- RF (constant-radius-to-fix) arc tracking ---
+    // Geometry from the real KSEA RNAV (RNP) Z RWY 16C approach: arc
+    // HEGEM -> SEGAW, centre CFBRK, R = 3.150 NM, left turn, swept ~72 deg.
+    auto MakeRfRoute = [](bool complexLeg) {
+        RouteSnapshot r;
+        r.valid = true;
+        r.sourceRoute = true;
+        r.wptCount = 4;
+        r.legCount = 3;
+        r.activeWpt = 2;
+        r.activeLeg = 1;
+        r.nextLeg = 2;
+
+        r.wpts.resize(4);
+        r.wpts[0].lat = 47.697239; r.wpts[0].lon = -122.483956; r.wpts[0].id = "FERIE";
+        r.wpts[1].lat = 47.646133; r.wpts[1].lon = -122.459689; r.wpts[1].id = "HEGEM";
+        r.wpts[2].lat = 47.609656; r.wpts[2].lon = -122.385864; r.wpts[2].id = "SEGAW";
+        r.wpts[3].lat = 47.559656; r.wpts[3].lon = -122.385864; r.wpts[3].id = "NEXT";
+        for (auto& w : r.wpts) w.posValid = true;
+
+        r.legs.resize(3);
+        r.legs[0] = RouteLeg{0, 0, 1, false};
+        r.legs[2] = RouteLeg{0, 2, 3, false};
+
+        RouteLeg& rf = r.legs[1];
+        rf.type = 0;
+        rf.firstWpt = 1;
+        rf.lastWpt = 2;
+        rf.complex = complexLeg;
+        rf.rfArc = true;
+        rf.rfRadiusNm = 3.150;
+        rf.rfCenterLat = 47.662125;
+        rf.rfCenterLon = -122.385728;
+        rf.rfTurn = -1;                 // left
+        rf.rfRadialStartDeg = 252.23;   // centre -> HEGEM
+        rf.rfRadialEndDeg = 180.10;     // centre -> SEGAW
+        rf.rfTotalSweptDeg = 72.13;
+        rf.rfEntryWpt = 1;
+        return r;
+    };
+
+    // On the circle at the entry fix the target is the inbound tangent
+    // (252.23 - 90 = 162.23 true), matching the FERIE->HEGEM course of 162.
+    {
+        Guidance g;
+        RouteSnapshot r = MakeRfRoute(true);
+        CdiInput cdi;
+        AircraftState s = MakeState(47.646133, -122.459689, 162.0);
+        LnavResult ln = g.computeLnav(s, r, cdi, cfg);
+        CHECK(ln.active && ln.source == "RF ARC", "RF arc branch active");
+        CHECK_NEAR(ln.desiredCourseMagDeg, 162.23, 2.0,
+                   "RF entry target is the tangent course");
+        CHECK(ln.turnProgress < 0.05, "RF progress ~0 at entry");
+    }
+
+    // Flying the arc in small steps: desired course sweeps monotonically to
+    // the left and progress never runs backwards.
+    {
+        Guidance g;
+        RouteSnapshot r = MakeRfRoute(true);
+        CdiInput cdi;
+        double prevCourse = 999.0;
+        double prevProg = -1.0;
+        bool monotonicCourse = true;
+        bool monotonicProg = true;
+        for (double radial = 250.0; radial >= 183.0; radial -= 2.0) {
+            double lat = 0.0, lon = 0.0;
+            destinationPoint(47.662125, -122.385728, radial, 3.15, lat, lon);
+            AircraftState s = MakeState(lat, lon, radial - 90.0);
+            LnavResult ln = g.computeLnav(s, r, cdi, cfg);
+            if (!ln.active || ln.source != "RF ARC") monotonicCourse = false;
+            if (prevCourse < 900.0) {
+                if (normalize180(ln.desiredCourseMagDeg - prevCourse) > 1.0)
+                    monotonicCourse = false;
+                if (ln.turnProgress < prevProg - 1e-6) monotonicProg = false;
+            }
+            prevCourse = ln.desiredCourseMagDeg;
+            prevProg = ln.turnProgress;
+        }
+        CHECK(monotonicCourse, "RF desired course sweeps monotonically left");
+        CHECK(monotonicProg, "RF progress monotonic non-decreasing");
+        CHECK(prevProg > 0.95, "RF progress reaches the roll-out window");
+    }
+
+    // Inside the roll-out lead (3 deg) the target freezes on the outbound
+    // tangent: radialEnd 180.10 - 90 = 90.10 true.
+    {
+        Guidance g;
+        RouteSnapshot r = MakeRfRoute(true);
+        CdiInput cdi;
+        double lat = 0.0, lon = 0.0;
+        destinationPoint(47.662125, -122.385728, 181.5, 3.15, lat, lon);
+        AircraftState s = MakeState(lat, lon, 95.0);
+        LnavResult ln = g.computeLnav(s, r, cdi, cfg);
+        CHECK_NEAR(ln.desiredCourseMagDeg, 90.10, 1.5,
+                   "RF target frozen on the outbound course in the lead window");
+        CHECK(ln.turnProgress >= 0.999, "RF progress complete while frozen");
+    }
+
+    // Off-circle correction: outside the circle the target rotates inward
+    // from the tangent; inside it rotates outward.  xtk reports the radial
+    // error in the route convention (positive = right of the path).
+    {
+        Guidance g;
+        RouteSnapshot r = MakeRfRoute(true);
+        CdiInput cdi;
+        double lat = 0.0, lon = 0.0;
+        destinationPoint(47.662125, -122.385728, 216.0, 3.65, lat, lon);
+        AircraftState s = MakeState(lat, lon, 126.0);
+        LnavResult ln = g.computeLnav(s, r, cdi, cfg);
+        CHECK(ln.desiredCourseMagDeg > 95.0 && ln.desiredCourseMagDeg < 105.0,
+              "RF outside the circle steers inward of the tangent (126 deg)");
+        CHECK(ln.xtkNm > 0.4, "RF outside the circle is right of path on a left arc");
+
+        destinationPoint(47.662125, -122.385728, 216.0, 2.65, lat, lon);
+        s = MakeState(lat, lon, 126.0);
+        ln = g.computeLnav(s, r, cdi, cfg);
+        CHECK(ln.desiredCourseMagDeg > 148.0 && ln.desiredCourseMagDeg < 157.0,
+              "RF inside the circle steers outward of the tangent");
+        CHECK(ln.xtkNm < -0.4, "RF inside the circle is left of path on a left arc");
+    }
+
+    // lnav_rf_enabled=0 restores the old behaviour: the complex leg passes
+    // through to the FF757 untouched.
+    {
+        Guidance g;
+        Config c = cfg;
+        c.lnavRfEnabled = false;
+        RouteSnapshot r = MakeRfRoute(true);
+        CdiInput cdi;
+        AircraftState s = MakeState(47.646133, -122.459689, 162.0);
+        LnavResult ln = g.computeLnav(s, r, cdi, c);
+        CHECK(!ln.active, "RF disabled: complex leg passes through");
+    }
+
+    // A CDU-synthesised route has straight legs only; an annotated RF leg
+    // (complex=false) must still be tracked as an arc.
+    {
+        Guidance g;
+        RouteSnapshot r = MakeRfRoute(false);
+        CdiInput cdi;
+        AircraftState s = MakeState(47.646133, -122.459689, 162.0);
+        LnavResult ln = g.computeLnav(s, r, cdi, cfg);
+        CHECK(ln.active && ln.source == "RF ARC",
+              "RF annotation on a straight CDU leg still tracks the arc");
+    }
+
+    // --- VNAV: speed-limit (DECEL) handling ---
+    // A descent profile that also hits a DECEL point at the same altitude
+    // should soften the fpm requirement by the deceleration lead (1 NM / 10 KT).
+    {
+        Guidance g;
+        RouteSnapshot r;
+        r.valid = true;
+        r.sourceRoute = true;   // CDU-declared route (speed constraints only come from CDU)
+        r.wptCount = 2;
+        r.legCount = 1;
+        r.activeWpt = 1;
+        r.activeLeg = 0;
+        r.nextLeg = -1;
+        // DECEL at lat=0, AAA behind at lat=-1 (60 NM) - irrelevant for distance calc
+        r.wpts.resize(2);
+        r.wpts[0].lat = -1.0; r.wpts[0].lon = 0.0; r.wpts[0].id = "AAA"; r.wpts[0].posValid = true;
+        r.wpts[1].lat = 0.0;   r.wpts[1].lon = 0.0;
+        r.wpts[1].id = "DECEL"; r.wpts[1].posValid = true;
+        r.wpts[1].altFt = 8000; r.wpts[1].altValid = true;
+        r.wpts[1].constraintSpeedKt = 250;
+        r.legs.resize(1);
+        r.legs[0] = RouteLeg{0, 0, 1, false};
+
+        AircraftState s;
+        s.valid = true; s.onGround = false; s.apEngaged = true; s.vnavMode = true;
+        // 4 NM from DECEL (4 minutes of lat = 4 * 1 NM), above minDistance=3 NM
+        s.lat = 0.066667; s.lon = 0.0;
+        s.altFt = 10000.0; s.vsFpm = -500.0; s.vsAccelFpmPerSec = 0.0;
+        s.gsKts = 250.0; s.iasKts = 350.0;  // 100 KT slowdown needed
+        s.selectedAltFt = 0.0;
+        Config c;
+        c.vnavRespectSelectedAlt = true;
+
+        VnavResult vn = g.computeVnav(s, r, c);
+        CHECK(vn.active && vn.pathBased, "DECEL leg path-based VNAV active");
+        CHECK(vn.targetSpdKt > 0.5 && vn.targetSpdKt < 251.0,
+              "DECEL point found: speed limit 250 kt");
+        CHECK(vn.targetSpdLeadNm > 9.5 && vn.targetSpdLeadNm < 10.5,
+              "decel lead = 10 NM for 100 KT slowdown (1 NM / 10 KT)");
+        // Nominal descent from 10000 to 8000 at 4 NM → rawRequired = -2082 fpm.
+        // DECEL lead = 10 NM → softened = -2082 * (4 / (4+10)) ≈ -595 fpm.
+        CHECK(vn.requiredVsFpm < -200.0 && vn.requiredVsFpm > -800.0,
+              "DECEL lead softens the required descent fpm well below the nominal");
+    }
+
+    // Hard 250 KT / 10000 ft auto-enforcement: waypoint below 10000 ft with
+    // speed above 270 KT triggers the FAR limit even with no CDU constraint.
+    {
+        Guidance g;
+        RouteSnapshot r;
+        r.valid = true;
+        r.sourceRoute = true;
+        r.wptCount = 2;
+        r.legCount = 1;
+        r.activeWpt = 1;
+        r.activeLeg = 0;
+        r.nextLeg = -1;
+        r.wpts.resize(2);
+        r.wpts[0].lat = -1.0; r.wpts[0].lon = 0.0; r.wpts[0].id = "AAA"; r.wpts[0].posValid = true;
+        r.wpts[1].lat = 0.0;   r.wpts[1].lon = 0.0;
+        r.wpts[1].id = "APPR1"; r.wpts[1].posValid = true;
+        r.wpts[1].altFt = 8000; r.wpts[1].altValid = true;   // below 10000 ft
+        // no constraintSpeedKt set - FAR 250/10000 must kick in automatically
+        r.legs.resize(1);
+        r.legs[0] = RouteLeg{0, 0, 1, false};
+
+        AircraftState s;
+        s.valid = true; s.onGround = false; s.apEngaged = true; s.vnavMode = true;
+        s.lat = 0.05; s.lon = 0.0;         // 3 NM from APPR1
+        s.altFt = 11000.0; s.vsFpm = -800.0; s.vsAccelFpmPerSec = 0.0;
+        s.gsKts = 300.0; s.iasKts = 310.0;
+        Config c;
+
+        VnavResult vn = g.computeVnav(s, r, c);
+        CHECK(vn.targetSpdKt > 0.5 && vn.targetSpdKt < 251.0,
+              "auto FAR 250/10000 detected on a low-altitude waypoint");
+        CHECK(vn.targetSpdLeadNm > 5.5 && vn.targetSpdLeadNm < 6.5,
+              "decel lead = 6 NM for 60 KT slowdown");
+    }
+
+    // Route WITHOUT speed constraint (cruise waypoint) must NOT invent a limit.
+    {
+        Guidance g;
+        RouteSnapshot r = MakeRoute();
+        CdiInput cdi;
+        AircraftState s = MakeState(0.0, 0.5, 90.0);
+        s.altFt = 35000.0; s.iasKts = 320.0; s.gsKts = 490.0; s.vsFpm = 0.0;
+        Config c;
+        VnavResult vn = g.computeVnav(s, r, c);
+        CHECK(vn.targetSpdKt < 0.5, "no speed limit invented for cruise");
+    }
+
+    // --- Long leg, small offset, high speed: no phantom intercept ---
+    // Reproduces the reported swing: UU402 -> BOKIR (60 NM), aircraft 11 NM
+    // along and ~1 NM right of the leg, 305 KT IAS / 400 KT GS.  Our computed
+    // course differs from the FMS leg course by 1.2 deg, which over 49 NM is
+    // a ~1 NM phantom cross-track.  Old logic turned that into a 21 deg left
+    // intercept; the aircraft must now stay within a few degrees.
+    {
+        Guidance g;
+        RouteSnapshot r;
+        r.valid = true;
+        r.sourceRoute = true;
+        r.wptCount = 2;
+        r.legCount = 1;
+        r.activeWpt = 1;
+        r.activeLeg = 0;
+        r.nextLeg = -1;
+        r.wpts.resize(2);
+        r.wpts[0].lat = 30.753416; r.wpts[0].lon = 104.135750; r.wpts[0].id = "UU402";
+        r.wpts[1].lat = 31.767778; r.wpts[1].lon = 104.349724; r.wpts[1].id = "BOKIR";
+        r.wpts[0].posValid = true; r.wpts[1].posValid = true;
+        r.legs.resize(1);
+        r.legs[0] = RouteLeg{0, 0, 1, false};
+
+        // 11 NM along the leg, 1 NM right of it.
+        const double legCrs = bearingTrue(r.wpts[0].lat, r.wpts[0].lon,
+                                          r.wpts[1].lat, r.wpts[1].lon);
+        double lat = 0.0, lon = 0.0;
+        destinationPoint(r.wpts[0].lat, r.wpts[0].lon, legCrs, 11.0, lat, lon);
+        double offLat = 0.0, offLon = 0.0;
+        destinationPoint(lat, lon, normalize360(legCrs + 90.0), 1.0, offLat, offLon);
+
+        AircraftState s = MakeState(offLat, offLon, legCrs);
+        s.magVarDeg = 0.0;
+        s.gsKts = 400.0;
+        s.iasKts = 305.0;
+
+        // FMS reports the same leg 1.2 deg off our computed course.
+        CdiInput cdi;
+        cdi.valid = true;
+        cdi.courseMagDeg = normalize360(legCrs - 1.2);
+        cdi.distanceNm = 60.3;
+        cdi.xtkNm = 0.03;
+
+        LnavResult ln = g.computeLnav(s, r, cdi, cfg);
+        CHECK(ln.active && ln.source == "ROUTE", "long leg route LNAV active");
+        CHECK(std::abs(ln.xtkNm) < 0.3,
+              "FMS course anchors the line: phantom cross-track removed");
+        CHECK(std::abs(ln.correctionDeg) < 5.0,
+              "no phantom intercept: correction stays under 5 deg");
+        CHECK(ln.note.find("course from FMS") != std::string::npos,
+              "note reports the FMS course re-anchor");
+    }
+
+    // Without a CDI course the geometry still must not swing: a 1.26 NM
+    // offset 49 NM from the fix is a ~1.5 deg correction, not 21 deg.
+    {
+        Guidance g;
+        RouteSnapshot r;
+        r.valid = true;
+        r.sourceRoute = true;
+        r.wptCount = 2;
+        r.legCount = 1;
+        r.activeWpt = 1;
+        r.activeLeg = 0;
+        r.nextLeg = -1;
+        r.wpts.resize(2);
+        r.wpts[0].lat = 30.753416; r.wpts[0].lon = 104.135750; r.wpts[0].id = "UU402";
+        r.wpts[1].lat = 31.767778; r.wpts[1].lon = 104.349724; r.wpts[1].id = "BOKIR";
+        r.wpts[0].posValid = true; r.wpts[1].posValid = true;
+        r.legs.resize(1);
+        r.legs[0] = RouteLeg{0, 0, 1, false};
+
+        const double legCrs = bearingTrue(r.wpts[0].lat, r.wpts[0].lon,
+                                          r.wpts[1].lat, r.wpts[1].lon);
+        double lat = 0.0, lon = 0.0;
+        destinationPoint(r.wpts[0].lat, r.wpts[0].lon, legCrs, 11.0, lat, lon);
+        double offLat = 0.0, offLon = 0.0;
+        destinationPoint(lat, lon, normalize360(legCrs + 90.0), 1.26, offLat, offLon);
+
+        AircraftState s = MakeState(offLat, offLon, legCrs);
+        s.gsKts = 400.0;
+        s.iasKts = 305.0;
+
+        LnavResult ln = g.computeLnav(s, r, CdiInput{}, cfg);
+        CHECK(std::abs(ln.correctionDeg) < 5.0,
+              "geometry-only homing: 1.26 NM offset at 49 NM commands < 5 deg");
+        CHECK(std::abs(ln.xtkNm - 1.26) < 0.15,
+              "cross-track still reports the true 1.26 NM offset");
+    }
+
+    // A genuine large offset still gets the Boeing capture: 4 NM off with
+    // 10 NM to run must command close to the 30 deg limit.
+    {
+        Guidance g;
+        RouteSnapshot r;
+        r.valid = true;
+        r.sourceRoute = true;
+        r.wptCount = 2;
+        r.legCount = 1;
+        r.activeWpt = 1;
+        r.activeLeg = 0;
+        r.nextLeg = -1;
+        r.wpts.resize(2);
+        r.wpts[0].lat = 0.0; r.wpts[0].lon = 0.0; r.wpts[0].id = "AAA";
+        r.wpts[1].lat = 0.166667; r.wpts[1].lon = 0.0; r.wpts[1].id = "BBB";
+        r.wpts[0].posValid = true; r.wpts[1].posValid = true;
+        r.legs.resize(1);
+        r.legs[0] = RouteLeg{0, 0, 1, false};
+
+        // Place the aircraft 10 NM from the fix, 4 NM right of the line.
+        double lat = 0.0, lon = 0.0;
+        destinationPoint(r.wpts[1].lat, r.wpts[1].lon, 180.0, 10.0, lat, lon);
+        double oLat = 0.0, oLon = 0.0;
+        destinationPoint(lat, lon, 90.0, 4.0, oLat, oLon);
+        AircraftState s = MakeState(oLat, oLon, 0.0);
+        s.gsKts = 250.0;
+
+        LnavResult ln = g.computeLnav(s, r, CdiInput{}, cfg);
+        CHECK(ln.xtkNm > 3.8 && ln.xtkNm < 4.2, "4 NM offset measured");
+        CHECK(std::abs(ln.correctionDeg) > 20.0,
+              "large offset still commands the Boeing capture angle");
     }
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(757LVNAVPlus VERSION 1.1.1 LANGUAGES CXX)
+project(757LVNAVPlus VERSION 1.2.4 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -44,6 +44,7 @@ set(LVNV_SOURCES
     src/cdu_parser.cpp
     src/cdu_reader.cpp
     src/nav_database.cpp
+    src/cifp_parser.cpp
 )
 
 add_library(757LVNAVPlus MODULE ${LVNV_SOURCES})
@@ -123,6 +124,19 @@ if(BUILD_TESTING)
         target_compile_options(757lvnv_cdu_tests PRIVATE -Wall -Wextra)
     endif()
     add_test(NAME 757lvnv_cdu COMMAND 757lvnv_cdu_tests)
+
+    add_executable(757lvnv_cifp_tests
+        tests/cifp_tests.cpp
+        src/cifp_parser.cpp
+        src/nav_database.cpp
+    )
+    target_include_directories(757lvnv_cifp_tests PRIVATE src)
+    if(MSVC)
+        target_compile_options(757lvnv_cifp_tests PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(757lvnv_cifp_tests PRIVATE -Wall -Wextra)
+    endif()
+    add_test(NAME 757lvnv_cifp COMMAND 757lvnv_cifp_tests)
 endif()
 
 install(TARGETS 757LVNAVPlus

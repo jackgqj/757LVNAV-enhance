@@ -112,6 +112,7 @@ void CduRouteReader::bindRefs() {
         XPLMGetSystemPath(root);
         if (root[0]) {
             nav_.setRootPath(root);
+            cifp_.setRootPath(root);
             navRootSet_ = true;
         }
     }
@@ -711,6 +712,9 @@ void CduRouteReader::buildSnapshot() {
         wpt.id = leg.id;
         wpt.altFt = leg.altFt > 0 ? leg.altFt : INT_MIN;
         wpt.altValid = leg.altFt > 0;
+        wpt.constraintSpeedKt = leg.constraintSpeedKt;
+        wpt.estSpeedKt = leg.estSpeedKt;
+        wpt.speedValid = leg.estSpeedKt > 0 || leg.constraintSpeedKt > 0;
 
         bool have = fixes.size() > i && fixes[i].valid;
         if (have) {
@@ -820,6 +824,7 @@ void CduRouteReader::buildSnapshot() {
         lastError_ = route_.validationError;
     } else {
         lastError_.clear();
+        AnnotateRfArcs(route_, cifp_, nav_);
     }
 }
 

@@ -22,11 +22,16 @@ enable_vnav_smoothing=1
 enable_lnav_fd_roll=0
 
 lnav_gain=0.65
-lnav_max_intercept_deg=25
+lnav_max_intercept_deg=30
+lnav_direct_intercept_deg=45
+lnav_xtk_blend_nm=2.5
 lnav_turn_lead_factor=1.0
 lnav_max_bank_deg=25
 lnav_max_course_error_deg=60
-lnav_intercept_distance_nm=1.5
+lnav_rollout_lead_deg=3.0
+lnav_rf_enabled=1
+rnp_enabled=1
+rnp_nm=0
 lnav_min_speed_kts=60
 lnav_min_distance_nm=0.05
 lnav_roll_gain=0.25
@@ -44,6 +49,7 @@ vnav_min_distance_nm=0.3
 vnav_max_alt_delta_ft=50000
 vnav_augment_speed_mode=0
 vnav_respect_selected_alt=1
+vnav_priority=1
 
 cdu_rescan_interval_s=0
 cdu_periodic_rescan=0
@@ -66,12 +72,17 @@ debug=0
 
 | Key | Meaning | Tuning |
 | --- | --- | --- |
-| `lnav_gain` | Cross-track intercept gain | Lower (0.4–0.6) for smoother, slower capture; higher (0.8–1.0) for tighter tracking |
-| `lnav_max_intercept_deg` | Maximum intercept angle | 25° is a good airliner default; reduce to 15° if your sim setup is twitchy |
+| `lnav_gain` | Cross-track gain, CDI-only fallback only | Route mode uses the Boeing capture model below |
+| `lnav_max_intercept_deg` | Constant intercept while well off course | 30° default (777 value). Applies when |XTK| ≥ `lnav_xtk_blend_nm` |
+| `lnav_direct_intercept_deg` | Cap for direct-to-fix homing at small |XTK| | 45° default. Small offsets home to the fix instead of re-intercepting the line |
+| `lnav_xtk_blend_nm` | Cross-track at which the small-offset homing hands over to the constant 30° capture | 2.5 nm default. Below it the aircraft flies at the fix (angle = atan(offset/distance), decaying as the offset closes); above it the constant capture applies, blended over ±0.4× this value. Raise it if long legs still show an early swing |
 | `lnav_turn_lead_factor` | How early the turn starts relative to the tangent point | 1.0 = tangent (no corner cut, no rollout overshoot). Increase only if the aircraft still overshoots fixes; decrease below 1.0 makes it turn earlier |
 | `lnav_max_bank_deg` | Bank used to compute turn radius | Match your normal LNAV bank limit (25° default) |
 | `lnav_max_course_error_deg` | Hard course-error clamp | 60° default; prevents extreme commands |
-| `lnav_intercept_distance_nm` | Minimum distance used for the intercept denominator | 1.5 nm default. Raise it to soften last-second turns near a fix; lower it only if capture is too sluggish |
+| `lnav_rollout_lead_deg` | Degrees of arc completed early before the target freezes on the outbound course | 3.0 deg default. If roll-out still overshoots, raise it; if the aircraft straightens visibly early and drifts outside, lower it |
+| `lnav_rf_enabled` | RF (constant-radius-to-fix) leg tracking from the CIFP procedure database | 1 default. RF legs (e.g. KSEA RNAV RNP approaches) are flown as true arcs instead of the FF757's polygonal approximation. Set 0 to pass RF legs through like any other complex leg |
+| `rnp_enabled` | RNP/ANP monitoring (777-style) | 1 default. The status window shows RNP/ANP and raises `NAV UNABLE RNP` when the estimate exceeds the requirement |
+| `rnp_nm` | Manual RNP override | 0 = automatic by phase (enroute 2.0, terminal 1.0 within 30 NM of the destination, approach 0.3 on final). Set e.g. 0.3 for an RNP AR procedure |
 | `lnav_min_speed_kts` | Below this, LNAV is idle | Avoid taxi/ground guidance |
 | `lnav_min_distance_nm` | CDI-only minimum distance | Prevents chasing a sequenced fix |
 | `enable_lnav_fd_roll` | Enable the experimental FD-roll bridge | 0 default; can also be toggled from the menu `LNAV FD roll (experimental)`. Turn on only after a controlled flight test |
@@ -94,6 +105,10 @@ debug=0
 | `vnav_max_alt_delta_ft` | Hard cap for implausible altitude constraints | 50000 ft default; also scales with distance to the fix (8000 ft minimum, 1200 ft/nm) |
 | `vnav_augment_speed_mode` | Allow path corrections while the FF757 is in VNAV SPD | **0 default**. VNAV SPD holds speed with pitch; a path correction there fights the speed loop. Set to 1 only for flight testing |
 | `vnav_respect_selected_alt` | Treat the MCP altitude as a climb ceiling / descent floor | 1 default. Prevents the plugin from descending past a level-off (for example when 34100 ft is selected) |
+| `vnav_priority` | Plugin holds VNAV pitch authority while its vertical path is valid | **1 default**. The FF757's VNAV and the plugin write the same FD pitch dataref; without the latch they alternate during DES (pitch tug-of-war). The plugin latches on the first valid path frame and releases only after ~2 s of inactivity. Set 0 to give the FF757 priority |
+| `vnav_speed_limits_enabled` | Speed-limit handling (DECEL points + FAR 250/10000) | **1 default**. Set 0 to disable both |
+| `vnav_speed_decel_factor_nm_per_10kt` | Deceleration lead: NM per 10 KT of slowdown | **1.0 default** (matches Boeing 777). A heavier aircraft can use 1.1–1.2; 0 disables the lead (forces the speed to be met exactly at the fix) |
+| `vnav_hard_250_below_ft` | FAR 250 KT ceiling altitude | **10000 ft default**. 0 disables the auto-enforcement |
 
 ### Route cache
 
@@ -179,8 +194,9 @@ gate for vertical guidance.
 | VNAV `written=0` | Check `override_flightdir_ptch` and whether the legacy FD pitch is writable. Some builds may use a different servo path. |
 | Status note `cockpit2 FD read-only; legacy FD path` | The probe could not make the cockpit2 FD value stick. Legacy FD pitch is still written; if the aircraft uses only cockpit2, VNAV has no authority on that build. |
 | Cuts the turn / rolls in too early | Lower `lnav_turn_lead_factor` (1.0 is the tangent point; 0.9 rolls in slightly later). Check that `lnav_max_bank_deg` matches the aircraft's bank limit. |
-| Overshoots the turn or the new course | Raise `lnav_intercept_distance_nm` (softer intercept in the last mile) or raise `lnav_turn_lead_factor` slightly (1.0–1.2). |
-| S-turns on a straight leg | Decrease `lnav_gain`. |
+| Overshoots the turn or the new course | Raise `lnav_turn_lead_factor` slightly (1.0–1.2) or `lnav_rollout_lead_deg`. |
+| Swings early on a long straight leg | Check the status note for `course from FMS`; if absent, the FMS course disagrees by more than 15° and the leg geometry is used. Raise `lnav_xtk_blend_nm` to delay the 30° capture further. |
+| S-turns on a straight leg | Decrease `lnav_max_intercept_deg` (CDI-only: decrease `lnav_gain`). |
 | VNAV porpoises | Increase `vnav_accel_gain`, decrease `vnav_vs_gain`, or increase `vnav_smoothing_tau_s`. |
 | VNAV never engages | Look at the raw `pitch_mode` in the status window and add it to `vnav_pitch_mode_a/b/c` (observed VNAV values: 0, 5, 6). |
 

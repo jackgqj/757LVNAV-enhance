@@ -14,6 +14,9 @@ struct RouteWaypoint {
     bool posValid = false;        // false when the ident could not be resolved
     int altFt = INT_MIN;          // estimated / constraint altitude, if available
     bool altValid = false;
+    int constraintSpeedKt = 0;    // hard speed constraint at this waypoint ("250"), 0 = none
+    int estSpeedKt = 0;           // published estimate ("310"), when present
+    bool speedValid = false;      // estSpeedKt is present on the CDU line
     std::string id;
 };
 
@@ -22,6 +25,20 @@ struct RouteLeg {
     int firstWpt = -1;            // inclusive index into RouteSnapshot::wpts
     int lastWpt = -1;             // inclusive
     bool complex = false;         // multi-point leg (arc, hold, procedure turn)
+
+    // RF (constant-radius-to-fix) arc geometry, resolved from the X-Plane
+    // CIFP database for the airport nearest the leg.  rfArc is true only when
+    // every field below is usable; guidance then tracks the arc itself instead
+    // of passing the leg through to the FF757's polygonal approximation.
+    bool rfArc = false;
+    double rfRadiusNm = 0.0;
+    double rfCenterLat = 0.0;
+    double rfCenterLon = 0.0;
+    int rfTurn = 0;               // +1 = right (clockwise), -1 = left
+    double rfRadialStartDeg = 0.0;  // bearing centre -> entry fix
+    double rfRadialEndDeg = 0.0;    // bearing centre -> exit fix
+    double rfTotalSweptDeg = 0.0;   // signed turn direction applied, 5..355
+    int rfEntryWpt = -1;          // index of the arc entry waypoint
 };
 
 struct RouteSnapshot {

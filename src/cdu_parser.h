@@ -10,6 +10,7 @@ struct CduLeg {
     int altFt = 0;              // estimated or constraint altitude
     int constraintAltFt = 0;    // hard altitude constraint, 0 if none
     int constraintSpeedKt = 0;  // hard speed constraint, 0 if none
+    int estSpeedKt = 0;         // published estimated speed ("310" on the top line)
     double legDistanceNm = 0.0; // distance printed on the leg's top line
     int page = 0;               // 1-based CDU page
     bool hold = false;

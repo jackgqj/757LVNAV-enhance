@@ -241,6 +241,18 @@ bool g_cockpit2Writable = false;
 float g_lastCockpit2RawOut = 1.0e9f;
 double g_lastCockpit2Correction = 0.0;
 
+// VNAV pitch priority.  The FF757 writes its own FD pitch from its VNAV path
+// while the plugin writes the same dataref; whichever writes last wins, so
+// the two controllers can alternate frame by frame ("夺权").  Once the plugin
+// has a valid descent path it latches priority, holds a frozen baseline
+// reference and keeps writing, and only releases after the path has been
+// inactive for ~2 s.
+bool g_vnavPriority = false;
+bool g_pitchAuthorityInit = false;
+double g_pitchAuthorityRef = 0.0;
+int g_vnavReleaseCount = 0;
+bool g_vnavPriorityLogged = false;
+
 bool g_rollFilterInit = false;
 double g_rollFilteredBaseline = 0.0;
 double g_rollLastBaseline = 0.0;
@@ -815,9 +827,10 @@ void ClearPitchOverride() {
     g_pitchWriteCount = 0;
     g_lastCockpit2RawOut = 1.0e9f;
     g_lastCockpit2Correction = 0.0;
+    g_pitchAuthorityInit = false;
 }
 
-bool WriteFdPitch(double correctionDeg, double dt) {
+bool WriteFdPitch(double correctionDeg, double dt, bool authority) {
     if (!g_refs.fdPitchLegacy || !g_refs.fdPitchLegacyWritable) {
         g_status.pitchWritten = false;
         g_vnav.note = "legacy FD pitch dataref is not writable";
@@ -841,7 +854,9 @@ bool WriteFdPitch(double correctionDeg, double dt) {
     // Never replace a near-zero FF757 pitch command with our own.  A zero
     // baseline usually means the avionics are not publishing a command (or
     // the aircraft is in a mode that must not be overridden); pass through.
-    if (std::abs(baseline) < 0.5) {
+    // With latched priority the plugin is the publisher, so the check is
+    // skipped: a zero here is our own command being read back.
+    if (!authority && std::abs(baseline) < 0.5) {
         ClearPitchOverride();
         g_status.pitchWritten = false;
         g_vnav.note = "FD pitch baseline near zero; pass-through";
@@ -857,9 +872,26 @@ bool WriteFdPitch(double correctionDeg, double dt) {
     const double alpha = clampd(1.0 - std::exp(-dt / tau), 0.0, 1.0);
     g_filteredBaseline = alpha * baseline + (1.0 - alpha) * g_filteredBaseline;
 
-    double target = g_filteredBaseline + clampd(correctionDeg,
-                                                -g_config.vnavMaxCorrectionDeg,
-                                                g_config.vnavMaxCorrectionDeg);
+    // Priority: hold the reference captured when the plugin took over instead
+    // of chasing the FF757's changing command.  The reference only re-centres
+    // while our own correction is small, i.e. while the two controllers
+    // actually agree; on disagreement it stays put and our loop owns pitch.
+    double baselineForTarget = g_filteredBaseline;
+    if (authority) {
+        if (!g_pitchAuthorityInit) {
+            g_pitchAuthorityRef = baseline;
+            g_pitchAuthorityInit = true;
+        } else if (std::abs(correctionDeg) < 0.5) {
+            g_pitchAuthorityRef += (baseline - g_pitchAuthorityRef) * 0.02;
+        }
+        baselineForTarget = g_pitchAuthorityRef;
+    } else {
+        g_pitchAuthorityInit = false;
+    }
+
+    double target = baselineForTarget + clampd(correctionDeg,
+                                               -g_config.vnavMaxCorrectionDeg,
+                                               g_config.vnavMaxCorrectionDeg);
     target = clampd(target, -20.0, 25.0);
 
     const double maxRate = g_config.vnavRateLimitDegPerSec * std::max(dt, 0.001);
@@ -1546,8 +1578,9 @@ void DrawStatusWindow(XPLMWindowID window, void* refcon) {
     DrawText(x, y, buf, ln.active ? 0.55f : 0.8f, ln.active ? 1.0f : 0.8f, ln.active ? 0.55f : 0.8f);
     y -= lineH;
 
-    std::snprintf(buf, sizeof(buf), "          base=%6.1f  target=%6.1f  corr=%+.1f deg  turn=%.0f%%",
+    std::snprintf(buf, sizeof(buf), "          base=%6.1f  target=%6.1f  corr=%+.1f deg  %s=%.0f%%",
                   ln.baseCourseMagDeg, ln.desiredCourseMagDeg, ln.correctionDeg,
+                  ln.source == "RF ARC" ? "RFarc" : "turn",
                   ln.turnProgress * 100.0);
     DrawText(x, y, buf, 0.9f, 0.9f, 0.9f);
     y -= lineH;
@@ -1555,7 +1588,25 @@ void DrawStatusWindow(XPLMWindowID window, void* refcon) {
     std::snprintf(buf, sizeof(buf), "          written=%d  active #%d -> next #%d",
                   g_status.navWritten ? 1 : 0, g_status.activeWpt, g_status.nextLeg);
     DrawText(x, y, buf, 0.9f, 0.9f, 0.9f);
-    y -= lineH + 4;
+    y -= lineH;
+
+    // 777-style NAV UNABLE RNP: amber/red when ANP has exceeded RNP, grey
+    // otherwise.  Hidden when monitoring is off or LNAV is idle.
+    if (g_config.rnpEnabled && ln.active && ln.rnpNm > 0.0) {
+        // "ANP(trk)" is deliberate: this value is the track-keeping error
+        // against the active path (cross-track, or radial error on RF arcs),
+        // not the real ANP, which is the 95% position-error estimate of the
+        // navigation solution that the FMS gets from GPS/IRS.
+        std::snprintf(buf, sizeof(buf), "          RNP=%.1f nm  ANP(trk)=%.2f nm  %s",
+                      ln.rnpNm, ln.anpNm,
+                      ln.rnpUnable ? "NAV UNABLE RNP" : "OK");
+        DrawText(x, y, buf,
+                 ln.rnpUnable ? 1.0f : 0.9f,
+                 ln.rnpUnable ? 0.45f : 0.9f,
+                 ln.rnpUnable ? 0.35f : 0.9f);
+        y -= lineH;
+    }
+    y -= 4;
 
     const VnavResult& vn = g_status.vnav;
     const bool vnavWriting = vn.active && !vn.passThrough;
@@ -1577,6 +1628,14 @@ void DrawStatusWindow(XPLMWindowID window, void* refcon) {
                   vn.requiredVsFpm, g_state.vsFpm, vn.correctionDeg);
     DrawText(x, y, buf, 0.9f, 0.9f, 0.9f);
     y -= lineH;
+
+    if (vn.targetSpdKt > 0.5) {
+        std::snprintf(buf, sizeof(buf),
+                      "          speed limit=%.0f kt @ %.1f NM  decel lead=%.1f NM",
+                      vn.targetSpdKt, vn.targetSpdDistNm, vn.targetSpdLeadNm);
+        DrawText(x, y, buf, 0.85f, 0.9f, 0.6f);
+        y -= lineH;
+    }
 
     std::snprintf(buf, sizeof(buf), "          smoothedFD=%d  written=%d  cdiSign=%+d",
                   g_config.enableVnavSmoothing ? 1 : 0, g_status.pitchWritten ? 1 : 0,
@@ -1642,7 +1701,7 @@ void CreateStatusWindow() {
     params.left = sl + 60;
     params.top = st - 60;
     params.right = params.left + 560;
-    params.bottom = params.top - 360;
+    params.bottom = params.top - 380;
     params.visible = 0;
     params.drawWindowFunc = DrawStatusWindow;
     params.handleMouseClickFunc = nullptr;
@@ -1672,6 +1731,20 @@ void UpdateStatusFromResults(const LnavResult& ln, const VnavResult& vn,
     g_status.vnav = vn;
     g_status.navWritten = navWritten;
     g_status.pitchWritten = pitchWritten;
+
+    // Log the NAV UNABLE RNP transitions once per change, like the 777 FMC
+    // caution, so the event is traceable in Log.txt after the flight.
+    static bool s_prevRnpUnable = false;
+    if (ln.rnpUnable != s_prevRnpUnable) {
+        s_prevRnpUnable = ln.rnpUnable;
+        if (ln.rnpUnable) {
+            Logf("NAV UNABLE RNP: ANP %.2f nm exceeds RNP %.2f nm",
+                 ln.anpNm, ln.rnpNm);
+        } else {
+            Logf("RNP alert cleared: ANP %.2f nm within RNP %.2f nm",
+                 ln.anpNm, ln.rnpNm);
+        }
+    }
 
     g_status.xtkNm = ln.xtkNm;
     g_status.distanceNm = ln.distanceNm;
@@ -1929,6 +2002,32 @@ float FlightLoopCallback(float elapsedSinceLastCall, float, int, void*) {
 
         bool pitchWritten = false;
         if (g_config.enableVnav && g_state.apEngaged && g_state.vnavMode) {
+            // Latch plugin pitch priority while our own vertical path is
+            // valid.  Without the latch the plugin drops to pass-through the
+            // moment a frame looks "level" or the FD baseline reads near zero,
+            // the FF757 takes pitch back, we take it again - the visible
+            // tug-of-war during DES.  Release needs ~2 s of continuous
+            // inactivity (40 frames at the 20 Hz flight loop).
+            const bool wantPriority = g_config.vnavPriority && g_vnav.active &&
+                                      g_vnav.pathBased && !g_vnav.passThrough;
+            if (wantPriority) {
+                if (!g_vnavPriority && !g_vnavPriorityLogged) {
+                    g_vnavPriorityLogged = true;
+                    Logf("VNAV pitch priority latched: reqVS=%+.0f vs=%+.0f targetAlt=%.0f",
+                         g_vnav.requiredVsFpm, g_state.vsFpm, g_vnav.targetAltFt);
+                }
+                g_vnavPriority = true;
+                g_vnavReleaseCount = 0;
+            } else if (g_vnavPriority) {
+                if (++g_vnavReleaseCount >= 40) {
+                    g_vnavPriority = false;
+                    g_vnavReleaseCount = 0;
+                    Logf("VNAV pitch priority released");
+                }
+            } else {
+                g_vnavReleaseCount = 0;
+            }
+
             if (g_vnav.passThrough) {
                 // VNAV SPD: leave the FF757's pitch/speed loop completely
                 // untouched.  Writing a smoothed baseline here would still
@@ -1936,14 +2035,18 @@ float FlightLoopCallback(float elapsedSinceLastCall, float, int, void*) {
                 ClearPitchOverride();
                 g_status.pitchWritten = false;
             } else if (g_vnav.active) {
-                pitchWritten = WriteFdPitch(g_vnav.correctionDeg, dt);
+                pitchWritten = WriteFdPitch(g_vnav.correctionDeg, dt, g_vnavPriority);
+                if (g_vnavPriority) g_vnav.note += " | plugin pitch priority";
             } else if (g_config.enableVnavSmoothing) {
-                pitchWritten = WriteFdPitch(0.0, dt);
+                pitchWritten = WriteFdPitch(0.0, dt, false);
                 if (g_vnav.note.empty()) g_vnav.note = "smoothing only; no vertical path";
             } else {
                 ClearPitchOverride();
             }
         } else {
+            g_vnavPriority = false;
+            g_vnavPriorityLogged = false;
+            g_vnavReleaseCount = 0;
             ClearPitchOverride();
         }
 
@@ -1990,6 +2093,10 @@ void ResetRuntimeState() {
     g_loggedRouteValid = false;
     g_lastVnavSource.clear();
     g_lastLnavSource.clear();
+    g_vnavPriority = false;
+    g_vnavPriorityLogged = false;
+    g_vnavReleaseCount = 0;
+    g_pitchAuthorityInit = false;
     ClearPitchOverride();
     ClearRollOverride();
 }

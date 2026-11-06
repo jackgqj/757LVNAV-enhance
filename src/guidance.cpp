@@ -79,12 +79,161 @@ VnavTarget FindVnavTarget(const RouteSnapshot& route, const AircraftState& state
     return target;
 }
 
+// A speed-limit target ahead of the aircraft.  Either a CDU-declared
+// constraint ("250" printed after the leg's NM) or the FAR hard limit of
+// 250 KT below 10000 ft applied to the first low-altitude waypoint.
+// decelLeadNm = 0 when there is no deceleration needed; otherwise 1 NM per
+// 10 KT slowdown from the current IAS, matching the 777 FMS rule.
+struct SpeedTarget {
+    bool valid = false;
+    int index = -1;
+    double distanceNm = 0.0;
+    int speedKt = 0;
+    double decelLeadNm = 0.0;
+    bool auto250 = false;
+    std::string id;
+};
+
+SpeedTarget FindSpeedTarget(const RouteSnapshot& route, const AircraftState& state,
+                            const Config& cfg) {
+    SpeedTarget t;
+    if (!cfg.vnavSpeedLimitsEnabled) return t;
+    if (!route.valid || !route.sourceRoute || route.activeWpt < 0) return t;
+
+    const RouteWaypoint* active = route.waypoint(route.activeWpt);
+    if (!active) return t;
+
+    double cum = distanceNm(state.lat, state.lon, active->lat, active->lon);
+    if (!std::isfinite(cum) || cum < 0.05) cum = 0.05;
+
+    // Current reference speed for computing deceleration lead.  Use IAS when
+    // available, fall back to ground speed, but keep the delta anchored to
+    // something physical - the same 1 NM / 10 KT ratio the 777's FMS uses.
+    const double curKt = (state.iasKts > 50.0 && state.iasKts < 500.0)
+                             ? state.iasKts
+                             : state.gsKts;
+
+    // FAR 250 KT below 10000 ft auto-enforcement applies only to waypoints
+    // the aircraft has not yet passed through.  Skip any waypoint that is
+    // currently behind us (within ~0.3 NM of the active position).
+    const double leadFactor = cfg.vnavSpeedDecelFactorNmPer10Kt;
+
+    for (int i = route.activeWpt; i < route.wptCount; ++i) {
+        const RouteWaypoint* w = route.waypoint(i);
+        if (!w) break;
+        if (i > route.activeWpt) {
+            const RouteWaypoint* prev = route.waypoint(i - 1);
+            if (!prev || !std::isfinite(prev->lat) || !std::isfinite(prev->lon) ||
+                !std::isfinite(w->lat) || !std::isfinite(w->lon)) break;
+            cum += distanceNm(prev->lat, prev->lon, w->lat, w->lon);
+        }
+
+        int limit = 0;
+        bool autoFlag = false;
+        if (w->constraintSpeedKt > 0 && w->constraintSpeedKt <= 500) {
+            limit = w->constraintSpeedKt;
+        } else if (cfg.vnavHard250BelowFt > 0.0 && w->altValid &&
+                   w->altFt < cfg.vnavHard250BelowFt && curKt > 270.0) {
+            // FAR 91.117(a): 250 KT below 10000 ft.  Only apply when we are
+            // actually above 270 KT; the aircraft is already slower, no need.
+            limit = 250;
+            autoFlag = true;
+        }
+        if (limit <= 0 || limit >= curKt - 2.0) continue;  // no slowdown needed
+
+        t.valid = true;
+        t.index = i;
+        t.distanceNm = cum;
+        t.speedKt = limit;
+        t.auto250 = autoFlag;
+        t.id = w->id;
+        if (leadFactor > 0.0) {
+            const double deltaKt = std::max(0.0, curKt - static_cast<double>(limit));
+            t.decelLeadNm = leadFactor * deltaKt / 10.0;
+        } else {
+            t.decelLeadNm = 0.0;
+        }
+        return t;
+    }
+    return t;
+}
+
 } // namespace
 
 void Guidance::reset() {
     cdiSign_ = 1;
     cdiDisagreeCount_ = 0;
     fdRollDisagreeCount_ = 0;
+    anpMeanAbsXtk_ = 0.0;
+    anpInit_ = false;
+    rnpExceedCount_ = 0;
+    rnpRecoverCount_ = 0;
+    rnpUnable_ = false;
+    rfLegIdx_ = -1;
+    rfLastRadialDeg_ = 0.0;
+    rfProgressDeg_ = 0.0;
+}
+
+// Remaining route distance from a waypoint to the destination, seeded with
+// the distance from the aircraft to that waypoint.
+namespace {
+double DistanceToDestination(const RouteSnapshot& route, int fromWptIdx,
+                             double initialNm) {
+    double d = initialNm;
+    for (int i = fromWptIdx + 1; i < route.wptCount; ++i) {
+        const RouteWaypoint* a = route.waypoint(i - 1);
+        const RouteWaypoint* b = route.waypoint(i);
+        if (!a || !b || !a->posValid || !b->posValid) break;
+        d += distanceNm(a->lat, a->lon, b->lat, b->lon);
+    }
+    return d;
+}
+} // namespace
+
+void Guidance::updateRnp(const Config& cfg, double absLateralErrNm,
+                         double distToDestNm, LnavResult& out) {
+    // RNP is the 95% lateral accuracy requirement of the flight phase; ANP is
+    // the 95% estimate of actual performance.  Phase defaults: enroute RNP
+    // 2.0, terminal RNP 1.0 within 30 NM of the destination (the AC 91-006
+    // terminal alerting boundary), approach RNP 0.3 on the final segment.
+    double rnp = cfg.rnpNm;
+    if (rnp <= 0.0) {
+        rnp = 2.0;
+        if (distToDestNm < 30.0) rnp = 1.0;
+        if (distToDestNm < 8.0)  rnp = 0.3;
+    }
+
+    // 95% containment proxy: low-pass the mean |cross-track| and double it.
+    // computeLnav runs once per flight-loop frame (~20 Hz), so alpha 0.02
+    // gives a ~2.5 s time constant - fast enough to follow a rejoin, slow
+    // enough not to chase single-frame noise.
+    if (!anpInit_) {
+        anpMeanAbsXtk_ = absLateralErrNm;
+        anpInit_ = true;
+    } else {
+        anpMeanAbsXtk_ += (absLateralErrNm - anpMeanAbsXtk_) * 0.02;
+    }
+    const double anp = 2.0 * anpMeanAbsXtk_;
+
+    if (cfg.rnpEnabled) {
+        // ~2 s of continuous violation raises the alert; clearing needs ANP
+        // back below 80% of RNP, so a noisy edge cannot flash the message.
+        if (anp > rnp) {
+            if (++rnpExceedCount_ >= 40) rnpUnable_ = true;
+            rnpRecoverCount_ = 0;
+        } else if (anp < 0.8 * rnp) {
+            if (++rnpRecoverCount_ >= 40) rnpUnable_ = false;
+            rnpExceedCount_ = 0;
+        }
+        out.rnpNm = rnp;
+    } else {
+        rnpUnable_ = false;
+        rnpExceedCount_ = 0;
+        rnpRecoverCount_ = 0;
+        out.rnpNm = 0.0;
+    }
+    out.anpNm = anp;
+    out.rnpUnable = rnpUnable_;
 }
 
 LnavResult Guidance::computeLnav(const AircraftState& state,
@@ -130,6 +279,118 @@ LnavResult Guidance::computeLnav(const AircraftState& state,
         if (!leg) {
             useRoute = false;
             out.note = "active leg missing";
+        } else if (leg->rfArc && cfg.lnavRfEnabled && leg->rfTurn != 0 &&
+                   leg->rfRadiusNm >= 0.3 && leg->rfTotalSweptDeg >= 5.0) {
+            // RF constant-radius-to-fix arc (geometry resolved from CIFP).
+            // The reference path is the circle itself: steer the tangent at
+            // the current radial plus a small correction that pulls the
+            // aircraft back onto the circle, instead of the FF757's polygonal
+            // approximation of the same leg.
+            const RouteWaypoint* exitW = route.waypoint(leg->lastWpt);
+            if (!exitW || !exitW->posValid) {
+                useRoute = false;
+                complexLeg = true;
+                out.note = "RF arc exit waypoint missing; passing through";
+            } else {
+                const double dir = static_cast<double>(leg->rfTurn);
+                const double total = leg->rfTotalSweptDeg;
+                const double radialNow =
+                    bearingTrue(leg->rfCenterLat, leg->rfCenterLon,
+                                state.lat, state.lon);
+
+                // Progress is unwrapped incrementally so arcs beyond 180 deg
+                // cannot wrap; a leg change or an implausible radial jump
+                // (route rescan) re-anchors the unwrap at the entry radial.
+                const double step =
+                    normalize180(dir * (radialNow - rfLastRadialDeg_));
+                if (route.activeLeg != rfLegIdx_ || std::abs(step) > 10.0) {
+                    rfLegIdx_ = route.activeLeg;
+                    rfProgressDeg_ = clampd(
+                        normalize180(dir * (radialNow - leg->rfRadialStartDeg)),
+                        0.0, total);
+                } else {
+                    rfProgressDeg_ =
+                        clampd(rfProgressDeg_ + step, 0.0, total);
+                }
+                rfLastRadialDeg_ = radialNow;
+
+                const double remaining = total - rfProgressDeg_;
+                const double rolloutLead =
+                    std::min(cfg.lnavRolloutLeadDeg, total * 0.25);
+
+                // Positive = outside the circle.
+                const double radialErr =
+                    distanceNm(leg->rfCenterLat, leg->rfCenterLon,
+                               state.lat, state.lon) -
+                    leg->rfRadiusNm;
+
+                double desiredTrue = 0.0;
+                if (remaining <= rolloutLead) {
+                    // Roll-out: freeze on the outbound tangent so the AP
+                    // levels the wings on the next course instead of
+                    // overshooting through it.
+                    desiredTrue =
+                        normalize360(leg->rfRadialEndDeg + dir * 90.0);
+                    turnProgress = 1.0;
+                } else {
+                    const double corr = clampd(
+                        rad2deg(std::atan2(radialErr, 1.0)), -30.0, 30.0);
+                    desiredTrue =
+                        normalize360(radialNow + dir * (90.0 + corr));
+                    turnProgress = clampd(
+                        rfProgressDeg_ /
+                            std::max(1e-6, total - rolloutLead),
+                        0.0, 1.0);
+                }
+
+                // Distance to go along the arc, not the chord.
+                routeDist = leg->rfRadiusNm * deg2rad(std::max(0.0, remaining));
+                routeXtkRight = -dir * radialErr;  // route convention
+                routeCourseMag = magneticFromTrue(
+                    normalize360(leg->rfRadialStartDeg + dir * 90.0),
+                    state.magVarDeg);
+
+                updateRnp(cfg, std::abs(radialErr),
+                          DistanceToDestination(route, leg->lastWpt, routeDist),
+                          out);
+
+                double desiredMag =
+                    magneticFromTrue(desiredTrue, state.magVarDeg);
+                desiredMag =
+                    clampCourseError(desiredMag, currentTrackMag, maxError);
+
+                out.active = true;
+                out.routeBased = true;
+                out.cdiFallback = false;
+                out.activeWpt = route.activeWpt;
+                out.activeLeg = route.activeLeg;
+                out.nextLeg = route.nextLeg;
+                out.xtkNm = routeXtkRight;
+                out.distanceNm = routeDist;
+                out.baseCourseMagDeg = routeCourseMag;
+                out.desiredCourseMagDeg = desiredMag;
+                out.correctionDeg = normalize180(desiredMag - routeCourseMag);
+                out.rollCorrectionDeg =
+                    clampd(cfg.lnavRollGain * out.correctionDeg,
+                           -cfg.lnavMaxRollCorrectionDeg,
+                           cfg.lnavMaxRollCorrectionDeg);
+                out.turnProgress = turnProgress;
+                out.source = "RF ARC";
+
+                // Bank the published radius actually needs at this
+                // groundspeed; above the bank limit the arc cannot be held.
+                const double v = state.gsKts * kMpsPerKt;
+                const double reqBank = rad2deg(std::atan2(
+                    v * v, 9.80665 * leg->rfRadiusNm * kMetersPerNm));
+                char note[180];
+                std::snprintf(
+                    note, sizeof(note),
+                    "RF arc R=%.2f nm %s, %.0f deg to go, needs %.0f deg bank%s",
+                    leg->rfRadiusNm, leg->rfTurn > 0 ? "R" : "L", remaining,
+                    reqBank,
+                    reqBank > cfg.lnavMaxBankDeg ? " (exceeds bank limit)" : "");
+                out.note = note;
+            }
         } else if (leg->complex) {
             // Arcs / holds / procedure turns need the full leg geometry.  Do
             // not replace the FF757's procedure guidance with a chord or a
@@ -175,15 +436,17 @@ LnavResult Guidance::computeLnav(const AircraftState& state,
                     syntheticInbound = true;
                 }
 
-                const double courseTrue = bearingTrue(startLat, startLon, end->lat, end->lon);
-                const double courseMag = magneticFromTrue(courseTrue, state.magVarDeg);
+                double courseTrue = bearingTrue(startLat, startLon, end->lat, end->lon);
+                double courseMag = magneticFromTrue(courseTrue, state.magVarDeg);
 
-                const double xtk = crossTrackNm(state.lat, state.lon,
-                                                startLat, startLon,
-                                                end->lat, end->lon);
+                double xtk = crossTrackNm(state.lat, state.lon,
+                                          startLat, startLon,
+                                          end->lat, end->lon);
+                bool courseFromCdi = false;
 
                 if (cdi.valid) {
-                    if (std::abs(normalize180(courseMag - cdi.courseMagDeg)) > 25.0) {
+                    const double dCourse = normalize180(courseMag - cdi.courseMagDeg);
+                    if (std::abs(dCourse) > 25.0) {
                         useRoute = false;
                         out.note = "route course disagrees with CDI";
                     } else {
@@ -191,6 +454,24 @@ LnavResult Guidance::computeLnav(const AircraftState& state,
                         if (std::abs(dist - cdi.distanceNm) > tolerance) {
                             useRoute = false;
                             out.note = "route distance disagrees with CDI";
+                        } else if (std::abs(dCourse) > 0.15 && !syntheticInbound) {
+                            // The FMS leg course is the magenta reference; ours
+                            // is derived from resolved coordinates and can sit
+                            // a degree off.  Over a 60 NM leg one degree of
+                            // difference is a phantom ~1 NM cross-track, which
+                            // used to command a 20 deg intercept at 400 kt and
+                            // swing the aircraft.  Re-anchor the course line on
+                            // the FMS course through the fix instead.
+                            courseMag = cdi.courseMagDeg;
+                            courseTrue = trueFromMagnetic(courseMag, state.magVarDeg);
+                            const double behind = std::max(dist + 10.0, 20.0);
+                            destinationPoint(end->lat, end->lon,
+                                             normalize360(courseTrue + 180.0),
+                                             behind, startLat, startLon);
+                            xtk = crossTrackNm(state.lat, state.lon,
+                                               startLat, startLon,
+                                               end->lat, end->lon);
+                            courseFromCdi = true;
                         }
                     }
                 }
@@ -214,6 +495,12 @@ LnavResult Guidance::computeLnav(const AircraftState& state,
                             cdiDisagreeCount_ = 0;
                         }
                     }
+
+                    // --- RNP / ANP monitoring (Boeing 777 FMC logic) ---
+                    // Shared with the RF arc branch: phase RNP selection, ANP
+                    // low-pass and the hysteresis NAV UNABLE RNP alert.
+                    updateRnp(cfg, std::abs(xtk),
+                              DistanceToDestination(route, endIdx, dist), out);
 
                     const RouteLeg* next = route.leg(route.nextLeg);
                     double nextCourseTrue = courseTrue;
@@ -239,18 +526,36 @@ LnavResult Guidance::computeLnav(const AircraftState& state,
 
                     double desiredTrue = courseTrue;
 
-                    // Intercept angle for one leg: the cross-track is measured
-                    // against the remaining distance to that leg's own fix.  A
-                    // very small denominator used to demand up to 25 deg of
-                    // intercept right at the fix, which caused the last-second
-                    // turn and the overshoot; the distance floor keeps that
-                    // correction realistic.
+                    // Boeing course capture: well off the track, command a
+                    // constant intercept (default 30 deg) back to the course
+                    // line; close to the track, home direct to the fix
+                    // (allowed up to 45 deg).  The hand-over is smooth and the
+                    // homing angle decays as the offset closes, so the capture
+                    // never snaps and never commands a long-range S-turn.
                     auto legIntercept = [&](double legXtk, double legDist) {
-                        const double d = std::max(legDist, cfg.lnavInterceptDistanceNm);
-                        const double ang =
-                            rad2deg(std::atan2(cfg.lnavGain * legXtk, d));
-                        return clampd(ang, -cfg.lnavMaxInterceptDeg,
-                                      cfg.lnavMaxInterceptDeg);
+                        const double ax = std::abs(legXtk);
+                        // Direct-to-fix geometry: when the offset is small the
+                        // course that reaches the fix differs from the leg
+                        // course by atan(xtk / distance-to-fix), so the
+                        // correction decays as the aircraft closes on the fix
+                        // instead of holding a fixed angle.  A short distance
+                        // floor only guards the divide near the fix.
+                        const double homing = rad2deg(
+                            std::atan2(ax, std::max(legDist, 0.3)));
+                        const double nearAng =
+                            std::min(homing, cfg.lnavDirectInterceptDeg);
+                        const double farAng = cfg.lnavMaxInterceptDeg;
+                        // Hand over to the constant capture angle only when the
+                        // aircraft really is off the course line.  The old
+                        // blend (ax / 2.5) already commanded ~21 deg for a
+                        // 1.2 NM offset 50 NM from the fix, which at 400 kt
+                        // swung the aircraft through a needless S-turn.
+                        const double blend = std::max(0.1, cfg.lnavXtkBlendNm);
+                        const double t =
+                            smoothstep01((ax - 0.8 * blend) / (0.4 * blend));
+                        const double ang = nearAng + (farAng - nearAng) * t;
+                        return clampd(ang, 0.0, 60.0) *
+                               (legXtk >= 0.0 ? 1.0 : -1.0);
                     };
                     double interceptDeg = legIntercept(xtk, dist);
 
@@ -313,7 +618,19 @@ LnavResult Guidance::computeLnav(const AircraftState& state,
                                 const double arcAngle = clampd(
                                     normalize180(sign * (radialNow - radialStart)),
                                     0.0, absDelta);
-                                turnProgress = arcAngle / absDelta;
+
+                                // Roll-out lead: freeze the target on the
+                                // outbound course a few degrees before the arc
+                                // ends.  The autopilot needs time to level the
+                                // wings; without the lead its own capture lag
+                                // carried the turn past the new course.
+                                const double rolloutLead =
+                                    std::min(cfg.lnavRolloutLeadDeg,
+                                             absDelta * 0.25);
+                                turnProgress = clampd(
+                                    arcAngle /
+                                        std::max(1e-6, absDelta - rolloutLead),
+                                    0.0, 1.0);
 
                                 if (arcAngle >= absDelta) {
                                     // Roll-out: track the outbound leg with its
@@ -327,6 +644,11 @@ LnavResult Guidance::computeLnav(const AircraftState& state,
                                         state.lat, state.lon,
                                         nextEnd->lat, nextEnd->lon);
                                     interceptDeg = legIntercept(xtkNext, distNext);
+                                } else if (arcAngle >= absDelta - rolloutLead) {
+                                    // Frozen on the outbound course while the
+                                    // AP levels the wings; no intercept yet.
+                                    desiredTrue = nextCourseTrue;
+                                    interceptDeg = 0.0;
                                 } else if (arcAngle > 0.0) {
                                     // On the arc the path itself is the
                                     // reference: steer the tangent course and
@@ -372,6 +694,7 @@ LnavResult Guidance::computeLnav(const AircraftState& state,
                                        ? "route geometry with synthetic inbound course"
                                        : "FF757 route + turn anticipation";
                     }
+                    if (courseFromCdi) out.note += " (course from FMS)";
                 }
             }
         }
@@ -470,6 +793,28 @@ VnavResult Guidance::computeVnav(const AircraftState& state,
 
     bool usedAltitude = false;
     const VnavTarget target = FindVnavTarget(route, state, cfg);
+    const SpeedTarget spd = FindSpeedTarget(route, state, cfg);
+    if (spd.valid) {
+        out.targetSpdKt = static_cast<double>(spd.speedKt);
+        out.targetSpdDistNm = spd.distanceNm;
+        out.targetSpdLeadNm = spd.decelLeadNm;
+    }
+
+    // Deceleration lead: when the speed constraint's required braking
+    // distance exceeds the natural descent distance for an ahead target,
+    // soften the descent path by commanding a shallower profile so we reach
+    // the fix at the right speed instead of having to brake hard on the
+    // short final.  The same 1 NM / 10 KT factor is used on the pitch side
+    // (treating extra deceleration distance as level-out distance).
+    double speedHoldLead = 0.0;
+    if (spd.valid && spd.decelLeadNm > 0.0 && target.valid && spd.index == target.index) {
+        // Aligned: the altitude target IS the DECEL fix.  Use the decel lead
+        // to pull out of the descent earlier, at a gentler VS.
+        speedHoldLead = spd.decelLeadNm;
+    } else if (spd.valid && spd.distanceNm < 1.5) {
+        // Already inside the decel fix itself: don't keep descending hard.
+        speedHoldLead = std::max(speedHoldLead, 0.5);
+    }
     if (target.valid) {
         // The MCP altitude is a ceiling in a climb and a floor in a descent.
         // Without this clamp a route constraint below the selected altitude
@@ -542,17 +887,34 @@ VnavResult Guidance::computeVnav(const AircraftState& state,
                 out.vsErrorFpm = 0.0;
                 out.correctionDeg = 0.0;
                 out.source = "ROUTE HOLD";
-                char note[180];
+                char note[220];
                 std::snprintf(note, sizeof(note),
-                              "before TOD: %s %d ft at %.1f NM (3 deg needs %.1f NM)",
+                              "before TOD: %s %d ft at %.1f NM (3 deg needs %.1f NM)%s%s",
                               target.id.empty() ? "WPT" : target.id.c_str(),
                               target.altFt, target.distanceNm,
-                              std::abs(deltaAlt) / 318.0);
+                              std::abs(deltaAlt) / 318.0,
+                              spd.valid ? " | decel lead " : "",
+                              spd.valid ? std::to_string(spd.decelLeadNm).c_str() : "");
                 out.note = note;
                 usedAltitude = true;
             } else {
+                // The nominal required VS for the altitude target.  Soften it
+                // when a deceleration lead overlaps the descent so we descend
+                // shallower than 3 deg.  This is the pitch-side expression of
+                // "need braking distance X NM - plan the descent so you cover
+                // that distance without hard brakes".
+                double finalRequired = rawRequired;
+                if (speedHoldLead > 0.0) {
+                    // Treat the decel lead as extra level distance inside the
+                    // descent, reducing the fpm requirement linearly.
+                    const double softened =
+                        rawRequired * std::max(0.3,
+                                               target.distanceNm /
+                                                   (target.distanceNm + speedHoldLead));
+                    finalRequired = clampd(softened, -cfg.vnavMaxVsFpm, cfg.vnavMaxVsFpm);
+                }
                 out.targetAltFt = profileAlt;
-                out.requiredVsFpm = clampd(rawRequired, -cfg.vnavMaxVsFpm, cfg.vnavMaxVsFpm);
+                out.requiredVsFpm = finalRequired;
 
                 // Never initiate a vertical path the FF757 is not already
                 // flying.  If the aircraft is level while the route target
@@ -583,10 +945,15 @@ VnavResult Guidance::computeVnav(const AircraftState& state,
                 } else {
                     out.vsErrorFpm = out.requiredVsFpm - state.vsFpm;
 
-                    if (std::abs(out.vsErrorFpm) < 150.0) {
+                    if (std::abs(out.vsErrorFpm) < 150.0 && speedHoldLead <= 0.0) {
                         // Small residual error: leave the FF757's pitch loop
                         // alone instead of injecting a micro-correction that
-                        // can turn into a porpoising feedback loop.
+                        // can turn into a porpoising feedback loop.  But
+                        // DO NOT apply this deadband while we are softening
+                        // the descent for a DECEL lead - the whole point of
+                        // the softening is to intentionally aim for a shallower
+                        // VS than the aircraft is currently flying, so a small
+                        // difference is not "residual" - it is the plan.
                         out.active = true;
                         out.pathBased = false;
                         out.passThrough = true;
@@ -606,12 +973,36 @@ VnavResult Guidance::computeVnav(const AircraftState& state,
                         out.active = true;
                         out.pathBased = true;
                         out.source = mcpLimited ? "ROUTE/MCP" : "ROUTE PROFILE";
-                        char note[180];
-                        std::snprintf(note, sizeof(note),
-                                      "VNAV profile to %s, %.1f NM, %.0f ft%s",
-                                      target.id.empty() ? "WPT" : target.id.c_str(),
-                                      target.distanceNm, profileAlt,
-                                      mcpLimited ? " (MCP limited)" : "");
+                        // Built with plain snprintf: computeVnav runs on every
+                        // flight-loop frame, so string concatenation here
+                        // would allocate continuously.
+                        char note[260];
+                        if (spd.valid && speedHoldLead > 0.0) {
+                            std::snprintf(note, sizeof(note),
+                                          "VNAV profile to %s, %.1f NM, %.0f ft%s"
+                                          " | speed %d kt @ %.0f NM, decel lead %.1f NM%s",
+                                          target.id.empty() ? "WPT" : target.id.c_str(),
+                                          target.distanceNm, profileAlt,
+                                          mcpLimited ? " (MCP limited)" : "",
+                                          spd.speedKt, spd.distanceNm,
+                                          spd.decelLeadNm,
+                                          spd.auto250 ? " (auto 250/10000)" : "");
+                        } else if (spd.valid) {
+                            std::snprintf(note, sizeof(note),
+                                          "VNAV profile to %s, %.1f NM, %.0f ft%s"
+                                          " | speed %d kt @ %.0f NM%s",
+                                          target.id.empty() ? "WPT" : target.id.c_str(),
+                                          target.distanceNm, profileAlt,
+                                          mcpLimited ? " (MCP limited)" : "",
+                                          spd.speedKt, spd.distanceNm,
+                                          spd.auto250 ? " (auto 250/10000)" : "");
+                        } else {
+                            std::snprintf(note, sizeof(note),
+                                          "VNAV profile to %s, %.1f NM, %.0f ft%s",
+                                          target.id.empty() ? "WPT" : target.id.c_str(),
+                                          target.distanceNm, profileAlt,
+                                          mcpLimited ? " (MCP limited)" : "");
+                        }
                         out.note = note;
                     }
                 }

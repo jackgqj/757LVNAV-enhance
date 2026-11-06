@@ -253,8 +253,8 @@ CduPage ParseCduLegsPage(const std::vector<std::string>& rows, int pageHint) {
         int estAlt = 0;
         int estSpeed = 0;
         ParseSpeedAltField(rest, estAlt, estSpeed);
-        (void)estSpeed;   // Mach/knot estimates are not used by this layer.
         if (estAlt > 0) leg.altFt = estAlt;
+        if (estSpeed > 0) leg.estSpeedKt = estSpeed;
 
         // A hard constraint, when present, is printed after "NM" on the
         // course line.  It takes precedence over the estimate.

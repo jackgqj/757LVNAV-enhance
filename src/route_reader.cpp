@@ -543,6 +543,10 @@ void RouteReader::rebuild() {
 
     route_.valid = true;
     route_.sourceRoute = true;
+
+    // RF arcs come from the CIFP procedure database, not from rteData; match
+    // and annotate them so guidance can fly a true constant-radius path.
+    cdu_.annotateRfArcs(route_);
 }
 
 void RouteReader::buildFallbackFromWaypoints() {

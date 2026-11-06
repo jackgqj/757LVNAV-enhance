@@ -53,6 +53,10 @@ struct LnavResult {
     double correctionDeg = 0.0;
     double rollCorrectionDeg = 0.0;
     double turnProgress = 0.0;
+    // RNP / ANP monitoring (777 FMC style).  rnpNm = 0 when monitoring is off.
+    double rnpNm = 0.0;              // required navigation performance in effect
+    double anpNm = 0.0;              // actual navigation performance estimate
+    bool rnpUnable = false;          // ANP exceeded RNP, sustained (hysteresis)
     std::string source;
     std::string note;
 };
@@ -65,6 +69,13 @@ struct VnavResult {
     double requiredVsFpm = 0.0;
     double vsErrorFpm = 0.0;
     double correctionDeg = 0.0;
+    // Speed-limit summary (FAR 250 KT below 10000 ft or DECEL point).  Used
+    // for the status window and for pitch softening so the path ends at the
+    // constraint at the right speed instead of forcing a hard brake at the
+    // fix.  targetSpdKt = 0 means no speed constraint ahead.
+    double targetSpdKt = 0.0;
+    double targetSpdDistNm = 0.0;  // distance along the route to the fix
+    double targetSpdLeadNm = 0.0;  // deceleration lead distance, 0 when none
     std::string source;
     std::string note;
 };
@@ -88,6 +99,28 @@ private:
     int cdiSign_ = 1;   // +1: positive CDI dot means "turn right"
     int cdiDisagreeCount_ = 0;
     int fdRollDisagreeCount_ = 0;
+
+    // ANP estimator: low-passed mean |cross-track|, doubled for a ~95%
+    // containment proxy.  The alert uses hysteresis so a noisy edge does not
+    // flash the message.
+    double anpMeanAbsXtk_ = 0.0;
+    bool anpInit_ = false;
+    int rnpExceedCount_ = 0;
+    int rnpRecoverCount_ = 0;
+    bool rnpUnable_ = false;
+
+    // RF arc tracking state.  Arc progress is unwrapped incrementally so arcs
+    // longer than 180 deg do not wrap; the state is re-initialised whenever a
+    // different leg becomes active.
+    int rfLegIdx_ = -1;
+    double rfLastRadialDeg_ = 0.0;
+    double rfProgressDeg_ = 0.0;
+
+    // Shared RNP/ANP monitor: phase RNP selection, ANP low-pass and the
+    // hysteresis alert.  absLateralErrNm is |cross-track| on straight legs or
+    // |radial error| on RF arcs.
+    void updateRnp(const Config& cfg, double absLateralErrNm,
+                   double distToDestNm, LnavResult& out);
 };
 
 } // namespace lvnv
