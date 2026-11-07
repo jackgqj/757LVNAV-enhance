@@ -262,8 +262,8 @@ MIT，版权 **JACKGONG**。详见 [`LICENSE`](LICENSE)。
 - **JACKGONG** — 757 LNAV/VNAV Plus 作者与维护者。
 - FlightFactor / StepToSky — 757/767 Professional 系列。
 - Laminar Research — X-Plane SDK。
-- FF757 社区 — dataref 观测与试飞反馈。
-
+- 作者留言：在此致敬所有**支持我的社区伙伴与好友**，是你们让我有着动力和带着有效反馈推进这个项目。
+ 
 测试后请附上状态窗内容与 `Log.txt` 中的 `[757LVNAV+]` 行，这是改进模式识别与增益默认值最快的方式。
 
 ---
@@ -654,7 +654,7 @@ dependencies and notices are listed in
 - **JACKGONG** — author and maintainer of 757 LNAV/VNAV Plus.
 - FlightFactor / StepToSky for the 757/767 Professional series.
 - Laminar Research for the X-Plane SDK.
-- The FF757 community for dataref observations and flight-testing feedback.
+- 作者留言：在此致敬所有**支持我的社区伙伴与好友**，是你们让我有着动力和带着有效反馈推进这个项目。
 
 If you test this plugin, please include the status-window contents and the
 `[757LVNAV+]` lines from `Log.txt` in your report. That is the fastest way to
