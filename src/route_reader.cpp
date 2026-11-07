@@ -1,6 +1,7 @@
 #include "route_reader.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -58,7 +59,30 @@ std::string sliceString(const std::vector<char>& buffer, int start, int len) {
     return trim(s);
 }
 
-int parseAltitudeString(const std::string& input) {
+// The private route alt string carries the same constraint qualifier as the
+// CDU LEGS page: "FL157A" = at or above, "6890B" = at or below.
+AltConstraint parseAltConstraint(const std::string& input) {
+    std::string s = trim(input);
+    for (char& c : s) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    if (s.find("ABOVE") != std::string::npos) return AltAtOrAbove;
+    if (s.find("BELOW") != std::string::npos) return AltAtOrBelow;
+
+    size_t lastDigit = std::string::npos;
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s[i] >= '0' && s[i] <= '9') lastDigit = i;
+    }
+    if (lastDigit == std::string::npos) return AltAt;
+    size_t j = lastDigit + 1;
+    while (j < s.size() && (s[j] == ' ' || s[j] == '\t')) ++j;
+    if (j < s.size()) {
+        if (s[j] == 'A') return AltAtOrAbove;
+        if (s[j] == 'B') return AltAtOrBelow;
+    }
+    return AltAt;
+}
+
+int parseAltitudeString(const std::string& input, AltConstraint& altType) {
+    altType = AltAt;
     std::string s = trim(input);
     if (s.empty()) return INT_MIN;
 
@@ -90,6 +114,7 @@ int parseAltitudeString(const std::string& input) {
     if (!started) return INT_MIN;
     if (flightLevel && value < 1000) value *= 100;
     if (value <= 0 || value > 100000) return INT_MIN;
+    altType = parseAltConstraint(input);
     return static_cast<int>(value);
 }
 
@@ -411,6 +436,7 @@ void RouteReader::rebuild() {
             if (alt > 0 && alt <= 100000) {
                 route_.wpts[static_cast<size_t>(i)].altFt = alt;
                 route_.wpts[static_cast<size_t>(i)].altValid = true;
+                route_.wpts[static_cast<size_t>(i)].altConstraint = AltAt;
             }
         }
     } else {
@@ -601,6 +627,7 @@ bool RouteReader::parseAltitudes(std::vector<int>& starts,
             if (alt > 0 && alt <= 100000) {
                 route_.wpts[static_cast<size_t>(i)].altFt = alt;
                 route_.wpts[static_cast<size_t>(i)].altValid = true;
+                route_.wpts[static_cast<size_t>(i)].altConstraint = AltAt;
             }
         }
         return n > 0;
@@ -613,10 +640,12 @@ bool RouteReader::parseAltitudes(std::vector<int>& starts,
     bool any = false;
     for (size_t i = 0; i < n; ++i) {
         std::string text = sliceString(buffer, starts[i], lens[i]);
-        int alt = parseAltitudeString(text);
+        AltConstraint altType = AltAt;
+        int alt = parseAltitudeString(text, altType);
         if (alt != INT_MIN) {
             route_.wpts[i].altFt = alt;
             route_.wpts[i].altValid = true;
+            route_.wpts[i].altConstraint = altType;
             any = true;
         }
     }

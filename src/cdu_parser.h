@@ -1,5 +1,7 @@
 #pragma once
 
+#include "route_model.h"
+
 #include <string>
 #include <vector>
 
@@ -8,6 +10,7 @@ namespace lvnv {
 struct CduLeg {
     std::string id;
     int altFt = 0;              // estimated or constraint altitude
+    AltConstraint altConstraint = AltAt;  // "A" = at or above, "B" = at or below
     int constraintAltFt = 0;    // hard altitude constraint, 0 if none
     int constraintSpeedKt = 0;  // hard speed constraint, 0 if none
     int estSpeedKt = 0;         // published estimated speed ("310" on the top line)

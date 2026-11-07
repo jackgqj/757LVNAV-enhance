@@ -8,12 +8,24 @@
 
 namespace lvnv {
 
+// Qualifier of an altitude constraint, as printed on the CDU LEGS page:
+// "FL157A" = at or above, "6890B" = at or below, "11765" = at.
+// VNAV must not chase an "at or above" floor that the aircraft is already
+// above - treating it as an exact crossing demands a descent the aircraft
+// cannot (and does not need to) fly.
+enum AltConstraint {
+    AltAt = 0,
+    AltAtOrAbove = 1,
+    AltAtOrBelow = 2,
+};
+
 struct RouteWaypoint {
     double lat = 0.0;
     double lon = 0.0;
     bool posValid = false;        // false when the ident could not be resolved
     int altFt = INT_MIN;          // estimated / constraint altitude, if available
     bool altValid = false;
+    AltConstraint altConstraint = AltAt;
     int constraintSpeedKt = 0;    // hard speed constraint at this waypoint ("250"), 0 = none
     int estSpeedKt = 0;           // published estimate ("310"), when present
     bool speedValid = false;      // estSpeedKt is present on the CDU line

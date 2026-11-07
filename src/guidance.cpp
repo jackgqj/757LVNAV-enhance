@@ -33,6 +33,12 @@ struct VnavTarget {
     double distanceNm = 0.0;   // along the route from the current position
     int altFt = 0;
     std::string id;
+    // Most restrictive "at or above" floor passed on the way to the target.
+    // It is not a descent target (we are already above it), but descending
+    // faster than this gradient would cross it below the published minimum.
+    bool floorValid = false;
+    double floorDistanceNm = 0.0;
+    int floorAltFt = 0;
 };
 
 // Walks forward from the active waypoint and finds the first altitude that
@@ -68,6 +74,27 @@ VnavTarget FindVnavTarget(const RouteSnapshot& route, const AircraftState& state
         if (!w->altValid) continue;
         if (std::abs(static_cast<double>(w->altFt) - state.altFt) < 100.0) continue;
         if (cum < minDistance) continue;
+        // A satisfied "at or above" floor must not become an exact crossing
+        // target: at 34000 ft with "FL157A" 43 NM ahead that demanded ~4000
+        // fpm, a descent the aircraft can neither fly nor needs to fly.  The
+        // FMC's own VNAV descends on its idle path through such a fix.
+        if (w->altConstraint == AltAtOrAbove && w->altFt < state.altFt) {
+            // Remember it only as a descent-rate limit for the chosen target:
+            // the path may not cross this fix below its minimum altitude.
+            const double allowedGradientNm =
+                (state.altFt - static_cast<double>(w->altFt)) / cum;
+            if (!target.floorValid ||
+                allowedGradientNm <
+                    (state.altFt - static_cast<double>(target.floorAltFt)) /
+                        target.floorDistanceNm) {
+                target.floorValid = true;
+                target.floorDistanceNm = cum;
+                target.floorAltFt = w->altFt;
+            }
+            continue;
+        }
+        // Likewise an "at or below" ceiling above us asks for no climb.
+        if (w->altConstraint == AltAtOrBelow && w->altFt > state.altFt) continue;
 
         target.valid = true;
         target.index = i;
@@ -136,8 +163,20 @@ SpeedTarget FindSpeedTarget(const RouteSnapshot& route, const AircraftState& sta
                    w->altFt < cfg.vnavHard250BelowFt && curKt > 270.0) {
             // FAR 91.117(a): 250 KT below 10000 ft.  Only apply when we are
             // actually above 270 KT; the aircraft is already slower, no need.
-            limit = 250;
-            autoFlag = true;
+            // Also only once the descent has reached the deceleration window:
+            // arm the 250 KT target when the aircraft is within one braking
+            // lead of passing 10000 ft, not while still 100 NM and FL200
+            // above it.
+            const double to10k =
+                std::max(0.0, state.altFt - cfg.vnavHard250BelowFt) / 318.0;
+            const double autoLead =
+                leadFactor > 0.0
+                    ? leadFactor * std::max(0.0, curKt - 250.0) / 10.0
+                    : 0.0;
+            if (to10k <= autoLead + 1.0) {
+                limit = 250;
+                autoFlag = true;
+            }
         }
         if (limit <= 0 || limit >= curKt - 2.0) continue;  // no slowdown needed
 
@@ -1072,6 +1111,24 @@ VnavResult Guidance::computeVnav(const AircraftState& state,
                                                    (target.distanceNm + speedHoldLead));
                     finalRequired = clampd(softened, -cfg.vnavMaxVsFpm, cfg.vnavMaxVsFpm);
                 }
+
+                // An "at or above" floor between us and the target is not a
+                // target, but the path still may not cross it below its
+                // published minimum.  Limit the descent gradient to the one
+                // that reaches the floor exactly.
+                bool floorClamped = false;
+                if (target.floorValid && finalRequired < 0.0) {
+                    const double floorGs = std::max(state.gsKts, 60.0);
+                    const double floorTimeMin =
+                        target.floorDistanceNm / floorGs * 60.0;
+                    const double floorAllowed =
+                        -(state.altFt - static_cast<double>(target.floorAltFt)) /
+                        std::max(floorTimeMin, 1.0e-3);
+                    if (finalRequired < floorAllowed) {
+                        finalRequired = floorAllowed;
+                        floorClamped = true;
+                    }
+                }
                 out.targetAltFt = profileAlt;
                 out.requiredVsFpm = finalRequired;
 
@@ -1136,31 +1193,36 @@ VnavResult Guidance::computeVnav(const AircraftState& state,
                         // flight-loop frame, so string concatenation here
                         // would allocate continuously.
                         char note[260];
+                        const char* floorText =
+                            floorClamped ? " | at-or-above floor kept" : "";
                         if (spd.valid && speedHoldLead > 0.0) {
                             std::snprintf(note, sizeof(note),
                                           "VNAV profile to %s, %.1f NM, %.0f ft%s"
-                                          " | speed %d kt @ %.0f NM, decel lead %.1f NM%s",
+                                          " | speed %d kt @ %.0f NM, decel lead %.1f NM%s%s",
                                           target.id.empty() ? "WPT" : target.id.c_str(),
                                           target.distanceNm, profileAlt,
                                           mcpLimited ? " (MCP limited)" : "",
                                           spd.speedKt, spd.distanceNm,
                                           spd.decelLeadNm,
-                                          spd.auto250 ? " (auto 250/10000)" : "");
+                                          spd.auto250 ? " (auto 250/10000)" : "",
+                                          floorText);
                         } else if (spd.valid) {
                             std::snprintf(note, sizeof(note),
                                           "VNAV profile to %s, %.1f NM, %.0f ft%s"
-                                          " | speed %d kt @ %.0f NM%s",
+                                          " | speed %d kt @ %.0f NM%s%s",
                                           target.id.empty() ? "WPT" : target.id.c_str(),
                                           target.distanceNm, profileAlt,
                                           mcpLimited ? " (MCP limited)" : "",
                                           spd.speedKt, spd.distanceNm,
-                                          spd.auto250 ? " (auto 250/10000)" : "");
+                                          spd.auto250 ? " (auto 250/10000)" : "",
+                                          floorText);
                         } else {
                             std::snprintf(note, sizeof(note),
-                                          "VNAV profile to %s, %.1f NM, %.0f ft%s",
+                                          "VNAV profile to %s, %.1f NM, %.0f ft%s%s",
                                           target.id.empty() ? "WPT" : target.id.c_str(),
                                           target.distanceNm, profileAlt,
-                                          mcpLimited ? " (MCP limited)" : "");
+                                          mcpLimited ? " (MCP limited)" : "",
+                                          floorText);
                         }
                         out.note = note;
                     }

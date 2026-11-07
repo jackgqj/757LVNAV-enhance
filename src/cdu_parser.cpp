@@ -68,13 +68,37 @@ bool HasDashField(const std::string& value) {
 
 constexpr size_t kMaxCduLegs = 160;
 
+// Qualifier printed after the altitude digits: "FL157A" = at or above,
+// "6890B" = at or below, plain "11765" = at the fix.
+AltConstraint ParseAltQualifier(const std::string& text) {
+    std::string up = Upper(TrimCdu(text));
+    if (up.find("ABOVE") != std::string::npos) return AltAtOrAbove;
+    if (up.find("BELOW") != std::string::npos) return AltAtOrBelow;
+
+    size_t lastDigit = std::string::npos;
+    for (size_t i = 0; i < up.size(); ++i) {
+        if (std::isdigit(static_cast<unsigned char>(up[i]))) lastDigit = i;
+    }
+    if (lastDigit == std::string::npos) return AltAt;
+
+    size_t j = lastDigit + 1;
+    while (j < up.size() && IsSpace(up[j])) ++j;
+    if (j < up.size()) {
+        if (up[j] == 'A') return AltAtOrAbove;
+        if (up[j] == 'B') return AltAtOrBelow;
+    }
+    return AltAt;
+}
+
 // Parses a CDU speed/altitude field.  The FF757 LEGS page prints SPEED first
 // and ALTITUDE second; live example: "EKIMU  .806/FL315".  The same layout is
 // used for hard constraints ("250/FL250").  A tolerant swap handles the rare
 // reverse presentation, where the right half is clearly a speed.
-void ParseSpeedAltField(const std::string& text, int& altFt, int& speedKt) {
+void ParseSpeedAltField(const std::string& text, int& altFt, int& speedKt,
+                        AltConstraint& altType) {
     altFt = 0;
     speedKt = 0;
+    altType = AltAt;
     const size_t slash = text.find('/');
     if (slash == std::string::npos) return;
 
@@ -84,6 +108,7 @@ void ParseSpeedAltField(const std::string& text, int& altFt, int& speedKt) {
 
     int alt = HasDashField(right) ? 0 : ParseCduAltitude(right);
     int spd = HasDashField(left) ? 0 : ParseCduSpeed(left);
+    const std::string* altText = &right;
 
     if (alt <= 0) {
         const int altLeft = HasDashField(left) ? 0 : ParseCduAltitude(left);
@@ -91,10 +116,14 @@ void ParseSpeedAltField(const std::string& text, int& altFt, int& speedKt) {
         if (altLeft > 0 && (spdRight > 0 || HasDashField(right))) {
             alt = altLeft;
             spd = spdRight;
+            altText = &left;
         }
     }
 
-    if (alt > 0 && alt <= 100000) altFt = alt;
+    if (alt > 0 && alt <= 100000) {
+        altFt = alt;
+        altType = ParseAltQualifier(*altText);
+    }
     if (spd > 0 && spd <= 500) speedKt = spd;
 }
 
@@ -252,8 +281,12 @@ CduPage ParseCduLegsPage(const std::vector<std::string>& rows, int pageHint) {
 
         int estAlt = 0;
         int estSpeed = 0;
-        ParseSpeedAltField(rest, estAlt, estSpeed);
-        if (estAlt > 0) leg.altFt = estAlt;
+        AltConstraint estType = AltAt;
+        ParseSpeedAltField(rest, estAlt, estSpeed, estType);
+        if (estAlt > 0) {
+            leg.altFt = estAlt;
+            leg.altConstraint = estType;
+        }
         if (estSpeed > 0) leg.estSpeedKt = estSpeed;
 
         // A hard constraint, when present, is printed after "NM" on the
@@ -262,10 +295,12 @@ CduPage ParseCduLegsPage(const std::vector<std::string>& rows, int pageHint) {
         if (nmPos != std::string::npos && nmPos + 2 < top.size()) {
             int conAlt = 0;
             int conSpeed = 0;
-            ParseSpeedAltField(top.substr(nmPos + 2), conAlt, conSpeed);
+            AltConstraint conType = AltAt;
+            ParseSpeedAltField(top.substr(nmPos + 2), conAlt, conSpeed, conType);
             if (conAlt > 0) {
                 leg.constraintAltFt = conAlt;
                 leg.altFt = conAlt;
+                leg.altConstraint = conType;
             }
             if (conSpeed > 0) leg.constraintSpeedKt = conSpeed;
         }

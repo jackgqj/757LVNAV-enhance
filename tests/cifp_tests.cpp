@@ -84,6 +84,7 @@ int main() {
     {
         std::vector<std::string> ff = {
             "SID,EO28R,28R,5",
+            "",                       // real Proc files separate blocks with blanks
             "IF,RW10L,29.301139,90.888000, ,0.0,0.0,0,0,0,0,0,0,0,0",
             "TF,LS803,29.300861,90.870028,0, ,0.0,0.0,0.0,0.0,0,0,0,0,0,0,0,0",
             "RF,LS602,29.292056,90.830639,1,LS041,290.7,4.7,0,0,0,0,0,0,0,0",
@@ -91,6 +92,9 @@ int main() {
             "RF,LS608,29.374861,90.822944,2,LS016,99.4,2.7,0,0,0,0,0,0,0,0",
             "STAR,OTHER,10L,2",
             "RF,LS999,29.1,90.1,2,LSX,10.0,5.0,0,0,0,0,0,0,0,0",
+            "",                       // trailing blank / one-field junk must not crash
+            "RF",
+            "not-a-proc-row",
         };
         std::vector<RfArcRow> arcs = CifpDatabase::ParseFfProcLines(ff);
         CHECK(arcs.size() == 4, "FF proc: four RF rows parsed across two blocks");

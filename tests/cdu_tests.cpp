@@ -65,6 +65,8 @@ void TestLegsPage() {
         Check(page.legs[0].altFt == 31500, "leg 0 altitude FL315");
         Check(page.legs[1].altFt == 32900, "leg 1 altitude FL329");
         Check(page.legs[2].altFt == 19700, "leg 2 altitude FL197A");
+        Check(page.legs[2].altConstraint == lvnv::AltAtOrAbove,
+              "FL197A is an at-or-above constraint");
         // Regression: the course on the line above must never be read as an
         // altitude (336 -> 33600, 010 -> 1000 was the old behaviour).
         Check(page.legs[0].altFt != 33600, "course 336 is not FL336");
@@ -88,7 +90,8 @@ void TestConstraints() {
         "WPT2           ---/FL180 ",
         " 300     11NM           ",
         "WPT3           ---/----- ",
-        "",
+        " 299     22NM           ",
+        "WPT4           299/6890B",
         "",
         "",
         "",
@@ -99,13 +102,18 @@ void TestConstraints() {
     const std::vector<std::string> rows = Rows(lines);
     const lvnv::CduPage page = lvnv::ParseCduLegsPage(rows);
     Check(page.valid, "constraint page valid");
-    Check(page.legs.size() == 3, "constraint page three legs");
-    if (page.legs.size() == 3) {
+    Check(page.legs.size() == 4, "constraint page four legs");
+    if (page.legs.size() == 4) {
         Check(page.legs[0].altFt == 25000, "speed/alt field FL250");
+        Check(page.legs[0].altConstraint == lvnv::AltAt,
+              "no suffix is an exact crossing");
         Check(page.legs[0].constraintAltFt == 0,
               "waypoint-line value is an estimate, not a hard constraint");
         Check(page.legs[1].altFt == 18000, "FL180 estimate");
         Check(page.legs[2].altFt == 0, "dash altitude is unavailable");
+        Check(page.legs[3].altFt == 6890, "6890B altitude parsed");
+        Check(page.legs[3].altConstraint == lvnv::AltAtOrBelow,
+              "6890B is an at-or-below constraint");
     }
 }
 

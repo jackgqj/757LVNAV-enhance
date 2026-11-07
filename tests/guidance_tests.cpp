@@ -349,6 +349,114 @@ int main() {
               "VNAV correction clamped");
     }
 
+    // "At or above" constraints are floors, not crossing targets.  Live route:
+    // AA146 FL157A 43 NM ahead at FL340 demanded ~4000 fpm (impossible), and
+    // the plugin fought the FMC's idle path.  The next exact constraint must
+    // become the target instead, giving a flyable gradient.
+    {
+        RouteSnapshot r = MakeRoute();
+        r.wpts[1].altFt = 15700;
+        r.wpts[1].altValid = true;
+        r.wpts[1].altConstraint = AltAtOrAbove;
+        r.wpts[2].altFt = 11765;
+        r.wpts[2].altValid = true;
+        r.wpts[2].altConstraint = AltAt;
+
+        AircraftState s = MakeState(0.0, 0.7, 90.0);  // 18 NM to BBB
+        s.altFt = 28000.0;
+        s.vsFpm = -1500.0;
+        s.gsKts = 400.0;
+
+        VnavResult vnA = guidance.computeVnav(s, r, cfg);
+        CHECK(vnA.active && vnA.pathBased, "A-floor path active");
+        CHECK_NEAR(vnA.targetAltFt, 11765.0, 1.0,
+                   "satisfied FL157A is skipped, CCC 11765 is the target");
+        CHECK(vnA.requiredVsFpm < -1500.0 && vnA.requiredVsFpm > -3000.0,
+              "A-floor target gives a flyable descent rate");
+
+        // Same geometry with an exact crossing: steeper demand, proving the
+        // qualifier is what changes the target.
+        r.wpts[1].altConstraint = AltAt;
+        VnavResult vnAt = guidance.computeVnav(s, r, cfg);
+        CHECK_NEAR(vnAt.targetAltFt, 15700.0, 1.0,
+                   "exact crossing still targets BBB");
+        CHECK(vnAt.requiredVsFpm < vnA.requiredVsFpm - 500.0,
+              "exact crossing demands a steeper descent than an A-floor");
+    }
+
+    // A skipped "at or above" floor still limits the descent gradient: the
+    // straight line to the next hard target would cross it below its minimum.
+    {
+        RouteSnapshot r;
+        r.valid = true;
+        r.sourceRoute = true;
+        r.wptCount = 3;
+        r.legCount = 2;
+        r.activeWpt = 1;
+        r.activeLeg = 0;
+        r.nextLeg = 1;
+        r.wpts.resize(3);
+        r.wpts[0].lat = 0.0;  r.wpts[0].lon = 0.0;  r.wpts[0].id = "AAA";
+        r.wpts[1].lat = 0.0;  r.wpts[1].lon = 1.0;  r.wpts[1].id = "BBB";
+        r.wpts[2].lat = 0.0;  r.wpts[2].lon = 1.25; r.wpts[2].id = "CCC";
+        for (auto& w : r.wpts) w.posValid = true;
+        r.wpts[1].altFt = 15700;
+        r.wpts[1].altValid = true;
+        r.wpts[1].altConstraint = AltAtOrAbove;
+        r.wpts[2].altFt = 7000;
+        r.wpts[2].altValid = true;
+        r.wpts[2].altConstraint = AltAt;
+        r.legs.resize(2);
+        r.legs[0] = RouteLeg{0, 0, 1, false};
+        r.legs[1] = RouteLeg{0, 1, 2, false};
+
+        AircraftState s = MakeState(0.0, 0.7, 90.0);  // 18 NM to BBB
+        s.altFt = 18000.0;
+        s.vsFpm = -400.0;   // keep the clamped error outside the FD deadband
+        s.gsKts = 400.0;
+
+        VnavResult vn = guidance.computeVnav(s, r, cfg);
+        CHECK(vn.active && vn.pathBased, "floor clamp path active");
+        CHECK_NEAR(vn.targetAltFt, 7000.0, 1.0,
+                   "floor clamp keeps the hard target");
+        // Line to CCC would need -2222 fpm and cross BBB at ~12000 ft.
+        // The floor allows (18000-15700) ft over 18 NM at 400 kt = -852 fpm.
+        CHECK_NEAR(vn.requiredVsFpm, -852.0, 30.0,
+                   "descent limited by the satisfied at-or-above floor");
+        CHECK(vn.note.find("at-or-above floor kept") != std::string::npos,
+              "floor clamp is reported in the note");
+
+        // Without the floor the same route goes to CCC directly and crosses
+        // BBB at ~12000 ft, so the clamp is what keeps the floor intact.
+        r.wpts[1].altValid = false;
+        VnavResult vnNoFloor = guidance.computeVnav(s, r, cfg);
+        CHECK_NEAR(vnNoFloor.targetAltFt, 7000.0, 1.0, "no-floor target CCC");
+        CHECK_NEAR(vnNoFloor.requiredVsFpm, -2222.0, 60.0,
+                   "no-floor line needs the steeper descent");
+        CHECK(vnNoFloor.requiredVsFpm < vn.requiredVsFpm - 800.0,
+              "floor clamp is what limits the descent");
+    }
+
+    // FAR 250/10000 must not arm at cruise for a low-altitude waypoint still
+    // 100+ NM ahead (live log: 250 kt target printed at 106 NM).
+    {
+        Guidance g;
+        RouteSnapshot r = MakeRoute();
+        r.wpts[1].altFt = 15700;
+        r.wpts[1].altValid = true;
+        r.wpts[2].altFt = 6890;
+        r.wpts[2].altValid = true;
+        r.wpts[2].altConstraint = AltAtOrBelow;
+        AircraftState s = MakeState(0.0, 0.75, 90.0);  // 15 NM to BBB, ~45 to CCC
+        s.altFt = 33000.0;
+        s.gsKts = 500.0;
+        s.iasKts = 300.0;
+        Config c;
+        VnavResult vn = g.computeVnav(s, r, c);
+        CHECK(vn.targetSpdKt < 0.5,
+              "no 250 kt target while still 45 NM and 23000 ft above it");
+    }
+
     // VNAV profile: active altitude equals current, so the next lower leg is
     // used.  Distance is accumulated along the route, not a straight line to
     // the active waypoint.

@@ -71,6 +71,7 @@ std::string PageSignature(const CduPage& page) {
         s += leg.id;
         s += ',';
         s += std::to_string(leg.altFt);
+        s += static_cast<char>('0' + static_cast<int>(leg.altConstraint));
         s += ',';
         s += std::to_string(static_cast<int>(leg.legDistanceNm * 10.0));
         if (leg.hold) s += 'H';
@@ -783,6 +784,7 @@ void CduRouteReader::buildSnapshot() {
         wpt.id = leg.id;
         wpt.altFt = leg.altFt > 0 ? leg.altFt : INT_MIN;
         wpt.altValid = leg.altFt > 0;
+        wpt.altConstraint = leg.altConstraint;
         wpt.constraintSpeedKt = leg.constraintSpeedKt;
         wpt.estSpeedKt = leg.estSpeedKt;
         wpt.speedValid = leg.estSpeedKt > 0 || leg.constraintSpeedKt > 0;

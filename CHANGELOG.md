@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.2.22 — 2026-11-07
+
+Fixes VNAV descent fighting the FMC profile.
+
+- Altitude constraints are now read with their CDU qualifier.  `FL157A` means
+  "at or above" and `6890B` means "at or below"; previously both were treated
+  as exact crossing restrictions.  A live route (`AA146 FL157A` 43 NM ahead at
+  FL340) was therefore demanding ~4000 fpm - a descent the aircraft can
+  neither fly nor needs to fly - and the plugin pulled the aircraft off the
+  FMC's idle path.  A satisfied "at or above" floor is now skipped and the
+  next exact/at-or-below constraint becomes the path target, giving a
+  flyable gradient.
+- The automatic 250 KT / 10000 ft limit is armed only once the aircraft is
+  within its braking lead of passing 10000 ft.  It used to point at the first
+  below-10000 ft waypoint regardless of distance, so the status showed
+  "250 kt @ 106 NM" during cruise.
+- The qualifier is parsed from both route sources: the CDU LEGS fallback and
+  the private `rteData` altitude strings.
+- A skipped "at or above" floor still limits the descent gradient.  The
+  straight line to the next hard target no longer crosses the floor fix below
+  its published minimum (the status note says "at-or-above floor kept" when
+  this limit is active).
+- Fixes a crash while reading the FF757 procedure database
+  (`Custom Data/STSFF/navdata/Proc/<ICAO>.txt`).  Those files separate
+  procedure blocks with blank lines, and `ParseFfProcLines` read field 1 of
+  a one-field line out of bounds; the resulting corrupt `std::string` crashed
+  inside `Trim` (live ZSPD route, fault offset resolved to `Trim +0xa5`).
+  Blank and short lines now reset the block instead of being indexed.
+- No change to LNAV or RF guidance.
+
 ## 1.2.21 — 2026-11-07
 
 Fixes a load failure on some machines and a CDU-scan crash.
