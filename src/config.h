@@ -49,6 +49,19 @@ struct Config {
     // 787 reference script; FD roll is skipped while it is live so only one
     // lateral controller commands roll.
     bool lnavRfNavOverride = true;
+    // Heading-direct guidance on **all** LNAV legs, not just RF arcs.  The
+    // plugin holds override_nav_heading=1 and writes nav_steer as a heading
+    // (desired track + wind correction + track damping), so the lateral path is
+    // actually flown by this plugin instead of only monitored.  Disable to
+    // leave straight legs to the FF757 and keep the override RF-only.
+    bool lnavHeadingDirect = true;
+    // L1-style cross-track term on straight legs (787 reference).  The basic
+    // course capture homes at atan(xtk / distance-to-fix), which on a long leg
+    // commands only a fraction of a degree and leaves a small steady offset
+    // (e.g. 0.15 NM).  This adds the difference to an L1 lookup correction
+    // (L1 = factor x turn radius, 0.5-8 NM), clamped to +/-4 deg, in
+    // heading-direct mode only.  Set 0 to disable.
+    double lnavL1Factor = 0.8;
     // Heading-direct RF command shaping (787 reference): damp = -gain *
     // (actual track - desired track), clamped to +/- max, then converted to a
     // heading with the wind-correction angle.  Suppresses oscillation and

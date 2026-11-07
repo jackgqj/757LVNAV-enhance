@@ -68,7 +68,7 @@
 - **`SPD STBY` / `PTH STBY` 是正常的待命状态**：前者是 VNAV SPD（爬升/速度保持，靠俯仰控速），后者通常是 VNAV PTH 但正保持 MCP 高度、尚未到 TOD 或误差在死区内。插件只是不写俯仰，模式已经被识别。
 - 只有 `VNAV : ACTIVE` 时才会看到俯仰修正。
 - **下降（DES）时插件独占俯仰**：机模自己的 VNAV 和插件都写同一个 FD 俯仰 dataref，逐帧互相覆盖就会"夺权"抖动。插件在拿到有效垂直路径的那一帧就锁定优先权（状态窗 notes 显示 `plugin pitch priority`），持续写入，直到垂直路径失效连续约 2 秒才释放。想让机模优先就把 `vnav_priority=0`。
-- **RF 定半径弧段（如西雅图 RNAV RNP 进近、拉萨 EO28R 离场）**：插件从 X-Plane 的 CIFP 程序数据库解析真实的圆弧（圆心、半径、转向），沿切线航向平滑跟踪整段弧，而不是像原版 FF757 那样飞成多边形。**FF757 原生不会飞 RF，所以整段（含入弧前）都由插件带飞**：入弧前沿入弧航道飞向入弧点（状态窗提示 `RF arc lead-in to <fix>`，不做 fly-by 提前转弯，因为圆弧与入弧航道相切）；到达入弧径向且飞机真的在圆上（偏差 1.5 NM 内，已接管后放宽到 3 NM）时切换为圆弧跟踪。**RF 段完全不参考 FF757 的 FMS 航路**（机模在 RNP 段的航路计算不可靠）：入弧前不做航向锚定，也不做 CDI 航向/距离校验，弧的捕获只依据 CIFP 几何。接管后状态窗 `src` 显示 `RF ARC`，日志会给出半径、剩余弧度数和当前地速所需坡度；若所需坡度超过 `lnav_max_bank_deg` 会标注提醒（弧仍会跟踪，但过小的半径在高速下可能保持不住）。可用 `lnav_rf_enabled=0` 关闭，退回原版透传。FF757 常把 `override_nav_heading` 保持为 0，仅写导航目标无法维持半径，因此 RF 弧段还会额外给 FD 滚转加一个**最大 ±4°** 的修正（只作用于该弧段，全局 `lnav_fd_roll` 仍保持关闭，状态窗显示 `RF arc FD roll (max 4 deg)`）；不需要就设 `lnav_rf_fd_roll=0`。RF 弧段默认采用**航向直写**（`lnav_rf_nav_override=1`）：每帧维持 `sim/operation/override/override_nav_heading=1` 并写 `nav_steer_deg_mag`；指令按参考的 787 脚本做法从"期望航迹"换算成"航向"——加风补角 `hdg − trk`，再加航迹阻尼 `−0.35×(trk − 期望航迹)`（限 ±10°，可用 `lnav_track_damp_gain` / `lnav_track_damp_max_deg` 调整）。机模每帧把该标志清 0 属正常现象，插件照常重新置 1（不再因此放弃）。此模式下**完全不写 FD 滚转**，保证同一时间只有一个横向控制器——1.2.12 的异常盘旋正是"override 与 FD 滚转同时接管"造成的。状态窗显示 `RF arc: heading direct (override=1)`。设 `lnav_rf_nav_override=0` 则退回 ±4° 滚转修正。
+- **RF 定半径弧段（如西雅图 RNAV RNP 进近、拉萨 EO28R 离场）**：插件从 X-Plane 的 CIFP 程序数据库解析真实的圆弧（圆心、半径、转向），沿切线航向平滑跟踪整段弧，而不是像原版 FF757 那样飞成多边形。**FF757 原生不会飞 RF，所以整段（含入弧前）都由插件带飞**：入弧前沿入弧航道飞向入弧点（状态窗提示 `RF arc lead-in to <fix>`，不做 fly-by 提前转弯，因为圆弧与入弧航道相切）；到达入弧径向且飞机真的在圆上（偏差 1.5 NM 内，已接管后放宽到 3 NM）时切换为圆弧跟踪。**RF 段完全不参考 FF757 的 FMS 航路**（机模在 RNP 段的航路计算不可靠）：入弧前不做航向锚定，也不做 CDI 航向/距离校验，弧的捕获只依据 CIFP 几何。接管后状态窗 `src` 显示 `RF ARC`，日志会给出半径、剩余弧度数和当前地速所需坡度；若所需坡度超过 `lnav_max_bank_deg` 会标注提醒（弧仍会跟踪，但过小的半径在高速下可能保持不住）。可用 `lnav_rf_enabled=0` 关闭，退回原版透传。FF757 常把 `override_nav_heading` 保持为 0，仅写导航目标无法维持半径，因此 RF 弧段还会额外给 FD 滚转加一个**最大 ±4°** 的修正（只作用于该弧段，全局 `lnav_fd_roll` 仍保持关闭，状态窗显示 `RF arc FD roll (max 4 deg)`）；不需要就设 `lnav_rf_fd_roll=0`。RF 弧段默认采用**航向直写**（`lnav_rf_nav_override=1`）：每帧维持 `sim/operation/override/override_nav_heading=1` 并写 `nav_steer_deg_mag`；指令按参考的 787 脚本做法从"期望航迹"换算成"航向"——加风补角 `hdg − trk`，再加航迹阻尼 `−0.35×(trk − 期望航迹)`（限 ±10°，可用 `lnav_track_damp_gain` / `lnav_track_damp_max_deg` 调整）。机模每帧把该标志清 0 属正常现象，插件照常重新置 1（不再因此放弃）。此模式下**完全不写 FD 滚转**，保证同一时间只有一个横向控制器——1.2.12 的异常盘旋正是"override 与 FD 滚转同时接管"造成的。状态窗显示 `RF arc: heading direct (override=1)`。设 `lnav_rf_nav_override=0` 则退回 ±4° 滚转修正。从 1.2.18 起，**航向直写默认应用到所有 LNAV 航段**（`lnav_heading_direct=1`）：直飞段同样每帧维持 `override_nav_heading=1`，状态窗显示 `heading direct (override=1)`；设 `lnav_heading_direct=0` 则直飞段交还机模，override 只在 RF 段使用。
 
 ## 4. 航路扫描规则
 
@@ -259,6 +259,10 @@ Key points:
   commands roll - writing both was what produced the 1.2.12 circling. The
   status note reads `RF arc: heading direct (override=1)`. Set
   `lnav_rf_nav_override=0` to fall back to the ±4° FD roll nudge.
+  Since 1.2.18, heading-direct is applied to **all** LNAV legs by default
+  (`lnav_heading_direct=1`); straight legs hold `override_nav_heading=1` too and
+  the note reads `heading direct (override=1)`. Set `lnav_heading_direct=0` to
+  hand straight legs back to the FF757 and keep the override RF-only.
   Set `lnav_rf_enabled=0` to pass RF legs through to the stock behaviour.
 
 ## 4. Route scanning rules

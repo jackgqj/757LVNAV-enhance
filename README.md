@@ -4,7 +4,7 @@
 
 > 独立的 X-Plane 插件，用于增强 FlightFactor 757/767 的 LNAV / VNAV 表现。它**不修改 SASL**、不改机模文件、也不改 FF 的 avionics 插件；只读取 FF757 公开的数据引用，并写入 X-Plane 标准的导航 / 飞行指引目标数据引用。删掉一个文件夹即可完全移除。
 
-当前版本：**v1.2.17**（完整更新见 [`CHANGELOG.md`](CHANGELOG.md)）
+当前版本：**v1.2.19**（完整更新见 [`CHANGELOG.md`](CHANGELOG.md)）
 
 **目录**： [中文](#中文) | [English](#english)
 
@@ -15,7 +15,7 @@
 ### 功能概览
 
 - **RF 定半径弧段**：从 FF757 自己的 `Proc/<ICAO>.txt` 解析真实圆弧（圆心、半径、左/右转），X-Plane CIFP 作为兜底。入弧前由插件沿入弧航道带飞，弧上按"切线 + 径向修正"平滑跟踪，不再是原版 FF757 的多边形拼接。入弧捕获只在飞机真正落在圆上（1.5 NM，接管后 3 NM）时发生，不会在几海里外提前抢弧。
-- **RF 航向直写**（默认）：RF 段每帧维持 `sim/operation/override/override_nav_heading=1` 并写 `nav_steer_deg_mag`，命令按 787 参考脚本从"期望航迹"换算成"航向"（风补角 `hdg−trk` + 航迹阻尼，限 ±10°）。该模式**不写 FD 滚转**，同一时间只有一个横向控制器；机模每帧把 override 清 0 属正常现象，插件会重新置位。可用 `lnav_rf_nav_override=0` 退回仅 ±4° FD 滚转修正。
+- **航向直写（全航段，默认）**：所有 LNAV 航段每帧维持 `sim/operation/override/override_nav_heading=1` 并写 `nav_steer_deg_mag`，命令按 787 参考脚本从"期望航迹"换算成"航向"（风补角 `hdg−trk` + 航迹阻尼，限 ±10°）。该模式**不写 FD 滚转**，同一时间只有一个横向控制器；机模每帧把 override 清 0 属正常现象，插件会重新置位。`lnav_heading_direct=0` 时直飞段交还机模、override 只保留在 RF 段；RF 段还可用 `lnav_rf_nav_override=0` 退回 ±4° FD 滚转修正。直飞段的小偏差再用 L1 前视项（`lnav_l1_factor`，默认 0.8）加速收敛，0.15 NM 级别的偏移会在数十秒内压回。
 - **LNAV 转弯与截获**：Boeing 式捕获——|XTK| ≥ 2.5 NM 时固定 30° 截获，以内按 `atan(xtk/dist)` 直飞修正；按地速与坡度限制计算提前转弯；航向锚定仅在 FMS 与自算航向差 ≤8° 时使用；CDI 校验需连续 ~2 s 不一致才降级，并有 `ROUTE HOLD` 兜底。
 - **航点识别**：以 CDU LEGS 第 1 页第 1 行为"下一个航点"，双向校正索引；辅以 FF757 `AirnavDis/AirnavBrg` 同步与沿航迹投影排序。RF 标注只在（入口→终点）在程序库中确为 RF 对时才成立，不会把别的 SID 的弧套到直飞段。
 - **VNAV 垂直路径**：按约束高度/垂直路径计算所需升降率，叠加垂直加速度阻尼，经低通与限速率写入 FD 俯仰；VNAV SPD（爬升/控速）阶段完全透传。下降（DES）时插件锁定俯仰优先权（`vnav_priority`），消除与机模 VNAV 的逐帧"夺权"。
@@ -30,7 +30,7 @@
 | 层 | 读取 | 写入 | 作用 |
 | --- | --- | --- | --- |
 | **航路** | 优先 FF757 私有 `rteData`；否则通过公开 CDU 显示 dataref 读 LEGS 页面 | 仅在扫描期间按 CDU 翻页键，扫完恢复原页面 | 航点坐标、高度、速度、距离、当前/下一航段 |
-| **LNAV** | 航路几何、当前航段、GPS CDI、FD 滚转 | `sim/cockpit/autopilot/nav_steer_deg_mag`；可选 FD 滚转修正（默认关闭） | 更平滑、带提前转弯的目标航向 |
+| **LNAV** | 航路几何、当前航段、GPS CDI、FD 滚转、航迹/航向 | `override_nav_heading=1` + `sim/cockpit/autopilot/nav_steer_deg_mag`（航向直写，默认）；关闭直写时改为可选 FD 滚转修正 | 更平滑、带提前转弯的目标航向，由插件直接压线 |
 | **RF 弧** | FF757 `Proc/<ICAO>.txt` 的 RF 行（CIFP 兜底） | `override_nav_heading=1` + `nav_steer_deg_mag`（默认），或 ±4° FD 滚转 | 插件带飞入弧与真实定半径弧 |
 | **VNAV** | 航路约束、垂直路径、FD 俯仰、MCP 高度 | `flight_director_pitch` + `override_flightdir_ptch`；cockpit2 FD 俯仰仅在可写时 | 带阻尼、限速率的垂直路径修正；SPD 模式透传 |
 | **RNP/ANP** | 航路几何 | 不写 | 仅状态窗与日志提示 |
@@ -82,7 +82,7 @@ FF757 私有航路 dataref 是**未公开**的：插件做尽力绑定，并始�
 3. 启动 X-Plane 并加载 FF757，`Plugins → 757 LNAV/VNAV Plus` 应出现。`Log.txt` 中应能看到：
 
    ```
-   [757LVNAV+] 757 LNAV/VNAV Plus v1.2.17 starting
+   [757LVNAV+] 757 LNAV/VNAV Plus v1.2.19 starting
    [757LVNAV+] FF avionics datarefs: found
    ```
 
@@ -103,7 +103,7 @@ X-Plane 12/Output/757LVNAVPlus.log
 
 1. 在 FF757 FMS 里装载航路，并让一台 CDU 停在 LEGS 页（优先右 CDU）。
 2. 正常接通 LNAV/VNAV，从菜单打开状态窗。
-3. 普通航段显示 `src=ROUTE`；RF 段显示 `src=RF ARC` 和 `RFarc=..%`；RF 航向直写时 notes 为 `RF arc: heading direct (override=1)`。
+3. 普通航段显示 `src=ROUTE`，notes 为 `heading direct (override=1)`；RF 段显示 `src=RF ARC` 和 `RFarc=..%`，notes 为 `RF arc: heading direct (override=1)`。
 4. 飞行中改航路后用菜单 **Rescan CDU route**。
 5. 若你的构建报告的模式值与默认不符，调整配置里的 `lnav_roll_mode`、`vnav_pitch_mode_a/b/c`、`ap_cmd_mode` 后重新加载配置。
 
@@ -119,14 +119,14 @@ X-Plane 12/Output/757LVNAVPlus.log
 | `RNP=.. ANP(trk)=.. OK / NAV UNABLE RNP` | RNP 要求与航迹保持估计（`ANP(trk)` 是代理量，不是 FMS 的 GPS/IRS ANP） |
 | `VNAV : PTH ACTIVE / SPD STBY` | FF757 VNAV 子模式；`ACTIVE` = 正在修正，`STBY` = 已识别但不干预 |
 | `reqVS / vs / corr` | 所需升降率、实际升降率、俯仰修正 |
-| `Notes` | RF 入弧/弧段、俯仰优先权、只读 dataref、保持状态 |
+| `Notes` | 航向直写、RF 入弧/弧段、俯仰优先权、只读 dataref、保持状态 |
 
 ### 默认行为
 
 - **LNAV** 开启：改善航向跟踪、提前转弯与 RF 弧。
 - **VNAV** 开启：小幅垂直路径修正 + FD 俯仰平滑。
 - **VNAV smoothing** 开启：无垂直路径时只平滑 FD 俯仰基线（不做修正）。
-- **RF 航向直写** 开启（仅 RF 段）。`lnav_rf_nav_override=0` 改用 ±4° FD 滚转；`lnav_rf_enabled=0` 则 RF 段完全透传。
+- **航向直写** 开启（默认覆盖所有 LNAV 航段）：每帧维持 `override_nav_heading=1` 并写航向目标，不写 FD 滚转。`lnav_heading_direct=0` 则直飞段交还机模、override 只用于 RF 段；`lnav_rf_nav_override=0` 让 RF 段退回 ±4° FD 滚转；`lnav_rf_enabled=0` 则 RF 段完全透传。
 - 地面、AP 断开、未识别到导航/垂直模式、航路或 CDI 无效时自动待命。
 
 ### 安全限值（默认）
@@ -282,13 +282,16 @@ layer** on top of the aircraft's own autopilot.
   flies the lead-in along the inbound course, captures the circle at the entry
   radial (1.5 NM band, 3 NM once tracking) and tracks the tangent with a bounded
   radial correction instead of the stock polygonal chain.
-- **Heading-direct RF guidance** (default): holds
+- **Heading-direct guidance** (default, all LNAV legs): holds
   `override_nav_heading=1` and writes `nav_steer_deg_mag` every frame, converting
   the desired track to a heading with the wind-correction angle (`hdg - trk`)
   plus track damping (±10°). FD roll is not written in this mode so only one
   lateral controller commands roll. The model clearing the flag each frame is
-  normal and is re-asserted. `lnav_rf_nav_override=0` falls back to a ±4°
-  FD-roll nudge.
+  normal and is re-asserted. `lnav_heading_direct=0` hands straight legs back to
+  the FF757 and keeps the override RF-only; `lnav_rf_nav_override=0` makes the
+  RF segment fall back to the ±4° FD-roll nudge. Small straight-leg offsets are
+  closed faster by an L1 look-ahead term (`lnav_l1_factor`, 0.8 default): a
+  0.15 NM offset is corrected in tens of seconds instead of minutes.
 - **LNAV capture and turns**: Boeing-style capture - a constant 30° intercept
   beyond 2.5 NM cross-track, direct homing `atan(xtk/dist)` below it; turn
   anticipation from groundspeed and bank limit; FMS course anchoring only
@@ -344,7 +347,7 @@ FF757 avionics (read only)                 Standard X-Plane (write only)
 | Layer | Reads | Writes | Effect |
 | --- | --- | --- | --- |
 | **Route** | private FF757 route arrays when exposed; otherwise the CDU LEGS page via public CDU display datarefs | CDU page keys only while scanning, then restores the page | Waypoint coordinates, altitudes, speeds, distances, active/next leg |
-| **LNAV** | route geometry, active-leg data, GPS CDI, FD roll | `sim/cockpit/autopilot/nav_steer_deg_mag`; optional FD-roll bank correction (off by default) | Smoother, turn-anticipating course target |
+| **LNAV** | route geometry, active-leg data, GPS CDI, FD roll, track/heading | `override_nav_heading=1` + `sim/cockpit/autopilot/nav_steer_deg_mag` heading (default); optional FD-roll correction when heading-direct is off | Smoother, turn-anticipating target the plugin actually flies |
 | **RF arcs** | FF757 `Proc/<ICAO>.txt` RF rows (CIFP fallback) | `override_nav_heading=1` + `nav_steer_deg_mag` heading (default), or a ±4° FD-roll nudge | Plugin-flown lead-in and true constant-radius arc |
 | **VNAV** | route constraints, vertical path, FD pitch, MCP altitude | `flight_director_pitch` + `override_flightdir_ptch`; cockpit2 FD pitch only if writable | Damped, rate-limited vertical-path correction; SPD passes through |
 | **RNP/ANP** | route geometry | nothing | Status/log monitoring only |
@@ -424,7 +427,7 @@ outbound leg. Every scan writes `CDU scan begin` / `CDU scan done` to
 3. Start X-Plane, load the FF757, and check `Log.txt` for:
 
    ```
-   [757LVNAV+] 757 LNAV/VNAV Plus v1.2.17 starting
+   [757LVNAV+] 757 LNAV/VNAV Plus v1.2.19 starting
    [757LVNAV+] FF avionics datarefs: found
    ```
 
@@ -465,15 +468,18 @@ Delete the config file to restore defaults.
 | `RNP=.. ANP(trk)=.. OK / NAV UNABLE RNP` | RNP requirement vs track-keeping estimate (`ANP(trk)` is a proxy, not the FMS GPS/IRS ANP) |
 | `VNAV : PTH ACTIVE / SPD STBY` | FF757 VNAV submode; `ACTIVE` = correcting, `STBY` = recognised but hands off |
 | `reqVS / vs / corr` | Required VS, actual VS, pitch correction |
-| `Notes` | RF lead-in/arc, pitch priority, read-only datarefs, holds |
+| `Notes` | Heading-direct, RF lead-in/arc, pitch priority, read-only datarefs, holds |
 
 ### Default behaviour
 
 - **LNAV** enabled: course tracking, turn anticipation and RF arcs.
 - **VNAV** enabled: small vertical-path correction plus FD pitch smoothing.
 - **VNAV smoothing** enabled: filters the FD pitch baseline when no path exists.
-- **RF heading-direct** enabled (RF only). `lnav_rf_nav_override=0` uses the
-  ±4° FD-roll path; `lnav_rf_enabled=0` passes RF legs through.
+- **Heading-direct** enabled (all LNAV legs): holds `override_nav_heading=1`
+  and writes a heading target; FD roll is not written. `lnav_heading_direct=0`
+  hands straight legs back to the FF757 and keeps the override RF-only;
+  `lnav_rf_nav_override=0` uses the ±4° FD-roll path on RF;
+  `lnav_rf_enabled=0` passes RF legs through.
 - Idle on the ground, with AP off, when the mode is not detected, or when
   route/CDI data is invalid.
 

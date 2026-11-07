@@ -273,7 +273,7 @@ double g_lastLegacyRollCorrection = 0.0;
 // treating that as a failure) matches the 787 reference script, and FD roll is
 // skipped while it is live so only one lateral controller commands roll.
 bool g_ownNavHeadingOverride = false;
-bool g_rfNavOverrideLogged = false;
+bool g_headingDirectLogged = false;
 int g_navOverrideAtFrameStart = 0;
 
 int g_errorCount = 0;
@@ -1004,7 +1004,7 @@ void ClearNavHeadingOverride() {
         XPLMSetDatai(g_refs.overrideNavHeading, 0);
     }
     g_ownNavHeadingOverride = false;
-    g_rfNavOverrideLogged = false;
+    g_headingDirectLogged = false;
 }
 
 bool WriteFdRoll(double correctionDeg, double dt) {
@@ -1995,18 +1995,21 @@ float FlightLoopCallback(float elapsedSinceLastCall, float, int, void*) {
         bool rollWritten = false;
         const bool rfArcNow = g_lnav.source == "RF ARC";
         if (g_config.enableLnav && g_lnav.active && g_state.apEngaged) {
-            // Write the nav target every frame.  Without the override X-Plane's
-            // generic AP ignores it; on RF arcs with heading-direct guidance it
-            // is the actual heading command.
-            const bool rfHeadingDirect = rfArcNow && g_config.lnavRfNavOverride;
+            // Heading-direct guidance: the plugin owns the lateral target on
+            // every LNAV leg (lnav_heading_direct, default) or, when that
+            // switch is off, on RF arcs only (lnav_rf_nav_override).  Without
+            // the override X-Plane's generic AP ignores nav_steer, so the
+            // target would only be monitored instead of flown.
+            const bool headingDirect = g_config.lnavHeadingDirect ||
+                                       (rfArcNow && g_config.lnavRfNavOverride);
             double navTargetMag = normalize360(g_lnav.desiredCourseMagDeg);
             if (g_refs.navSteerWritable) {
-                if (rfHeadingDirect) {
+                if (headingDirect) {
                     // The nav controller consumes nav_steer_deg_mag as a
                     // HEADING, while our guidance output is a desired TRACK.
-                    // Convert with the wind-correction angle (hdg - trk) and
-                    // add track-error damping, the same command shape as the
-                    // 787 reference: heading = track + damp + WCA.
+                    // Convert with the wind-correction angle (hdg - trk) and add
+                    // track-error damping, the same command shape as the 787
+                    // reference: heading = track + damp + WCA.
                     const double trackMag =
                         magneticFromTrue(g_state.trackTrueDeg, g_state.magVarDeg);
                     const double headingMag = RdF(g_refs.magPsi, NAN);
@@ -2021,10 +2024,30 @@ float FlightLoopCallback(float elapsedSinceLastCall, float, int, void*) {
                                            : 0.0;
                     navTargetMag =
                         normalize360(g_lnav.desiredCourseMagDeg + damp + wca);
+
+                    // L1 cross-track term (787 reference).  The base capture
+                    // homes at atan(xtk / distance-to-fix); on a long leg that
+                    // is a fraction of a degree and leaves a small steady offset
+                    // (0.15 NM at 28 NM commanded only 0.3 deg).  Add the
+                    // difference to an L1 look-ahead correction, clamped so the
+                    // large-offset Boeing capture is not disturbed.  RF arcs
+                    // already use the radial correction and are skipped.
+                    if (!rfArcNow && Finite(g_lnav.xtkNm) &&
+                        g_lnav.distanceNm > 0.5 && g_config.lnavL1Factor > 0.0) {
+                        const double turnR =
+                            turnRadiusNm(g_state.gsKts, g_config.lnavMaxBankDeg);
+                        const double l1 = clampd(g_config.lnavL1Factor * turnR,
+                                                 0.5, 8.0);
+                        const double homingDeg = rad2deg(std::atan2(
+                            -g_lnav.xtkNm, std::max(0.2, g_lnav.distanceNm)));
+                        const double l1Deg = rad2deg(std::atan2(-g_lnav.xtkNm, l1));
+                        const double extra = clampd(l1Deg - homingDeg, -4.0, 4.0);
+                        navTargetMag = normalize360(navTargetMag + extra);
+                    }
                 }
                 XPLMSetDataf(g_refs.navSteer, static_cast<float>(navTargetMag));
                 navWritten = true;
-                if (!g_state.lnavOverride && !rfArcNow) {
+                if (!g_state.lnavOverride && !headingDirect) {
                     g_lnav.note = "nav target write (override_nav_heading=0)";
                 }
                 if (g_config.debug && g_pitchWriteCount < 3) {
@@ -2036,22 +2059,22 @@ float FlightLoopCallback(float elapsedSinceLastCall, float, int, void*) {
                 g_lnav.note = "nav_steer dataref is not writable";
             }
 
-            // RF heading-direct: hold override_nav_heading every frame.  The
-            // model clears it each frame - that is normal (the 787 reference
-            // counts and re-asserts the same way), not a failure - so re-assert
-            // it and keep nav_steer in step.  FD roll is skipped below, leaving
-            // a single lateral controller in command.
+            // Heading-direct: hold override_nav_heading every frame.  The model
+            // clears it each frame - that is normal (the 787 reference counts
+            // and re-asserts the same way), not a failure - so re-assert it and
+            // keep nav_steer in step.  FD roll is skipped below, leaving a single
+            // lateral controller in command.
             bool navOverrideLive = false;
-            const bool rfNavOverrideWanted = rfHeadingDirect && navWritten &&
-                                             g_refs.overrideNavHeadingWritable;
-            if (rfNavOverrideWanted) {
+            const bool navOverrideWanted = headingDirect && navWritten &&
+                                           g_refs.overrideNavHeadingWritable;
+            if (navOverrideWanted) {
                 if (g_navOverrideAtFrameStart == 0) {
                     XPLMSetDatai(g_refs.overrideNavHeading, 1);
                     g_ownNavHeadingOverride = true;
-                    if (!g_rfNavOverrideLogged) {
-                        g_rfNavOverrideLogged = true;
-                        Logf("RF arc: heading direct, override_nav_heading=1 (target %.1f)",
-                             navTargetMag);
+                    if (!g_headingDirectLogged) {
+                        g_headingDirectLogged = true;
+                        Logf("LNAV: heading direct, override_nav_heading=1 (target %.1f, %s)",
+                             navTargetMag, rfArcNow ? "RF arc" : "route");
                     }
                 } else if (g_ownNavHeadingOverride) {
                     XPLMSetDatai(g_refs.overrideNavHeading, 1);
@@ -2062,35 +2085,32 @@ float FlightLoopCallback(float elapsedSinceLastCall, float, int, void*) {
             }
 
             g_status.lnavOverride = g_state.lnavOverride || navOverrideLive;
-            if (rfArcNow) {
-                if (navOverrideLive) {
+            if (navOverrideLive) {
+                if (rfArcNow) {
                     g_lnav.note = "RF arc: heading direct (override=1)";
+                } else if (g_lnav.note.empty() ||
+                           g_lnav.note.find("nav target write") != std::string::npos) {
+                    g_lnav.note = "heading direct (override=1)";
                 }
             }
 
-            // This FF757 build does not set override_nav_heading in LNAV.  Add
-            // a small bank correction to the FD roll that the aircraft already
-            // produces, so LNAV is still augmented through the servo path.
-            // On RF arcs the nav target alone cannot hold the published
-            // radius, so a small (max 4 deg) roll nudge is applied there even
-            // when the global FD-roll path is disabled.  It is limited to this
-            // leg, so no other leg can be pulled into an unwanted turn.
-            // While the nav override is live the controller already flies our
-            // target, so stacking a second roll command would recreate the
-            // same tug-of-war - do not write FD roll in that case.
+            // FD-roll bridge: only when the nav override is not live.  On RF arcs
+            // (with heading-direct off) it is limited to +/-4 deg; the global path
+            // (enable_lnav_fd_roll) uses the configured correction.
             const bool rfRoll = rfArcNow && g_config.lnavRfFdRoll && !navOverrideLive;
-            if (g_config.enableLnavFdRoll || rfRoll) {
+            const bool globalRoll = g_config.enableLnavFdRoll && !navOverrideLive;
+            if (globalRoll || rfRoll) {
                 double corr = g_lnav.rollCorrectionDeg;
-                if (rfRoll && !g_config.enableLnavFdRoll) {
+                if (rfRoll && !globalRoll) {
                     corr = clampd(corr, -4.0, 4.0);
                 }
                 rollWritten = WriteFdRoll(corr, dt);
                 if (rollWritten && g_lnav.note.find("read-only") == std::string::npos) {
-                    if (rfRoll) {
-                        g_lnav.note = "RF arc FD roll (max 4 deg)";
-                    } else {
+                    if (globalRoll) {
                         g_lnav.note = navWritten ? "nav target + FD roll"
                                                  : "FD roll path (nav_steer override off)";
+                    } else {
+                        g_lnav.note = "RF arc FD roll (max 4 deg)";
                     }
                 }
             } else {

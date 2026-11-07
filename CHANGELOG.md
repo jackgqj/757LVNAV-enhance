@@ -1,5 +1,38 @@
 # Changelog
 
+## 1.2.19 — 2026-11-07
+
+Closes the small steady cross-track offset on long straight legs.
+
+- With heading-direct guidance a 0.15 NM offset on a 28 NM leg commanded only
+  `atan(0.15 / 28.6) ≈ 0.3°`, so closing it took minutes and any residual wind
+  error left it standing.
+- Added an L1 look-ahead term on straight legs (787 reference): the correction
+  uses `L1 = factor × turn radius` (0.5–8 NM) and adds the difference to the
+  base homing angle, clamped to ±4°. RF arcs are excluded (they already use the
+  radial correction).
+- New `lnav_l1_factor` (default 0.8; 0 disables). Large offsets still use the
+  existing 30° / 2.5 NM Boeing capture.
+
+## 1.2.18 — 2026-11-07
+
+Heading-direct guidance now covers every LNAV leg, not just RF arcs.
+
+- On straight legs the plugin previously only wrote `nav_steer_deg_mag` while
+  `override_nav_heading` stayed 0, so X-Plane's nav controller ignored the
+  target and the aircraft flew the FF757's own LNAV (a small wind-induced
+  track offset was visible: TRK 327 vs a 331.8 target with the CDI at 0.14 dot).
+- New `lnav_heading_direct` (default **1**): on every LNAV leg the plugin holds
+  `override_nav_heading=1`, writes `nav_steer_deg_mag` as a **heading**
+  (desired track + wind-correction angle + track damping), and skips FD roll so
+  only one lateral controller commands roll. Released when LNAV drops out, the
+  AP disengages, the sim pauses or the plugin is disabled.
+- `lnav_heading_direct=0` restores the previous behaviour (straight legs pass
+  through to the FF757; the override remains RF-only via
+  `lnav_rf_nav_override`).
+- Status note on straight legs reads `heading direct (override=1)`; the
+  status window's `navOverride` reflects the plugin-held flag.
+
 ## 1.2.17 — 2026-11-07
 
 Fixed straight legs being mistaken for RF arcs (ZULS "越飞越偏 / 误识别为RF").
