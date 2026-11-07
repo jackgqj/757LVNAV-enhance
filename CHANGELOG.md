@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.2.21 — 2026-11-07
+
+Fixes a load failure on some machines and a CDU-scan crash.
+
+- The CDU reader constructor is a global/static initializer, so it ran inside
+  DllMain during `LoadLibrary`.  It called `XPLMFindDataRef` and
+  `XPLMGetSystemPath`, which is undefined from DllMain; X-Plane reported it as
+  `Error Code = 1114 : DLL initialization routine failed` on a user's machine.
+  The constructor no longer touches XPLM - refs bind lazily on the first flight-loop
+  tick.
+- The CDU screen buffer is always allocated for a full 32x64 screen instead of
+  the currently reported line/width size.  A custom CDU display accessor that
+  writes past `inMaxLength` right after a page change can no longer corrupt the
+  heap; the local crash resolved to a string helper during the route rebuild.
+- No behaviour change in guidance.
+
+## 1.2.20 — 2026-11-07
+
+Softer L1 cross-track term.
+
+- 1.2.19's `lnav_l1_factor=0.8` put L1 near 4 NM at cruise, so a 0.15 NM
+  offset commanded about 1.7°.  The default factor is now **1.6**, which
+  reaches the 8 NM L1 cap above ~400 KT: the same offset commands about 1°
+  (0.3° base homing + ~0.7° L1 term), which still closes it in well under a
+  minute without a visible swing.
+- `lnav_l1_factor` remains configurable; lower it (e.g. 0.8) for a stronger
+  correction, or set 0 to disable.
+
 ## 1.2.19 — 2026-11-07
 
 Closes the small steady cross-track offset on long straight legs.

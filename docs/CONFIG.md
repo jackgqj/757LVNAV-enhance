@@ -33,7 +33,7 @@ lnav_rf_enabled=1
 lnav_rf_fd_roll=1
 lnav_rf_nav_override=1
 lnav_heading_direct=1
-lnav_l1_factor=0.8
+lnav_l1_factor=1.6
 lnav_track_damp_gain=0.35
 lnav_track_damp_max_deg=10
 rnp_enabled=1
@@ -90,7 +90,7 @@ debug=0
 | `lnav_rf_fd_roll` | Small FD roll correction on RF arcs only | **1 default**. The FF757 often keeps `override_nav_heading=0`, so the nav target cannot hold the radius; this adds up to ±4° of roll while an RF arc is tracked. No other leg is affected (global `lnav_fd_roll` stays 0). Set 0 to leave roll fully to the model |
 | `lnav_rf_nav_override` | Heading-direct RF guidance: hold `sim/operation/override/override_nav_heading=1` on RF arcs | **1 default**. The nav controller flies the plugin's `nav_steer_deg_mag`, converted from desired track to heading with the wind-correction angle (`hdg - trk`) plus track damping - the same command shape as the 787 reference script. The FF757 clears the flag every frame, so the plugin re-asserts it each frame (normal, not a failure). FD roll is skipped while this is live, so only one lateral controller commands roll. Set 0 to use the `±4°` FD roll nudge instead (when `lnav_heading_direct=0`) |
 | `lnav_heading_direct` | Heading-direct guidance on **all** LNAV legs | **1 default**. Every active LNAV leg holds `override_nav_heading=1` and writes `nav_steer_deg_mag` as a heading (track + WCA + damping), so straight legs are actively flown instead of only monitored; FD roll is skipped while live. Released when LNAV drops out, AP disengages, the sim pauses or the plugin is disabled. Set 0 to hand straight legs back to the FF757 and keep the override RF-only |
-| `lnav_l1_factor` | L1 look-ahead cross-track term on straight legs | 0.8 default. Adds the difference between `atan(xtk / L1)` (L1 = factor × turn radius, 0.5–8 NM) and the base `atan(xtk / distance-to-fix)`, clamped to ±4°, so a small steady offset (0.15 NM on a 28 NM leg) closes in tens of seconds instead of minutes. RF arcs are excluded. Set 0 to disable; large offsets still use the 30° Boeing capture |
+| `lnav_l1_factor` | L1 look-ahead cross-track term on straight legs | 1.6 default. Adds the difference between `atan(xtk / L1)` (L1 = factor × turn radius, 0.5–8 NM) and the base `atan(xtk / distance-to-fix)`, clamped to ±4°, so a small steady offset (0.15 NM on a 28 NM leg) closes in under a minute. At 1.6 the L1 cap is reached above ~400 KT, giving about 1° for a 0.15 NM offset; lower values correct harder, 0 disables. RF arcs are excluded. Large offsets still use the 30° Boeing capture |
 | `lnav_track_damp_gain` | Track-error damping gain in heading-direct RF mode | 0.35 default. `damp = -gain × (actual track - desired track)`; damps the overshoot/oscillation of the arc capture |
 | `lnav_track_damp_max_deg` | Damping limit | 10° default. Raise only if the arc capture still oscillates; too high makes the turn sluggish |
 | `rnp_enabled` | RNP/ANP monitoring (777-style) | 1 default. The status window shows RNP/ANP and raises `NAV UNABLE RNP` when the estimate exceeds the requirement |

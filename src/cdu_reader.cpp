@@ -81,7 +81,11 @@ std::string PageSignature(const CduPage& page) {
 } // namespace
 
 CduRouteReader::CduRouteReader() {
-    bindRefs();
+    // No XPLM calls here.  This constructor runs as a static initializer
+    // (global object), i.e. inside DllMain during LoadLibrary.  Calling XPLM
+    // from DllMain is undefined and was failing with "DLL initialization
+    // routine failed" (error 1114) on some machines.  Refs are bound lazily
+    // from update() on the first flight-loop tick.
 }
 
 void CduRouteReader::bindRefs() {
@@ -161,7 +165,13 @@ bool CduRouteReader::readScreen(CduRefs& refs, std::vector<std::string>& rows) {
     lines = std::max(1, std::min(lines, 32));
     width = std::max(1, std::min(width, 64));
     const int total = lines * width;
-    std::vector<char> buffer(static_cast<size_t>(total), ' ');
+    // Size the buffer for a full 32x64 screen regardless of what the line/width
+    // datarefs currently report.  A custom CDU display accessor that ignores
+    // inMaxLength (right after a page change) could otherwise write past the
+    // reported size and corrupt the heap; the resulting crash surfaced later,
+    // inside a string helper during the route rebuild.
+    constexpr size_t kMaxScreenBytes = 32 * 64;
+    std::vector<char> buffer(kMaxScreenBytes, ' ');
     const int bytes = XPLMGetDatab(refs.symbols, buffer.data(), 0, total);
     lastReadBytes_ = bytes;
     lastReadTotal_ = total;

@@ -58,10 +58,12 @@ struct Config {
     // L1-style cross-track term on straight legs (787 reference).  The basic
     // course capture homes at atan(xtk / distance-to-fix), which on a long leg
     // commands only a fraction of a degree and leaves a small steady offset
-    // (e.g. 0.15 NM).  This adds the difference to an L1 lookup correction
+    // (e.g. 0.15 NM).  This adds the difference to an L1 look-ahead correction
     // (L1 = factor x turn radius, 0.5-8 NM), clamped to +/-4 deg, in
-    // heading-direct mode only.  Set 0 to disable.
-    double lnavL1Factor = 0.8;
+    // heading-direct mode only.  The 1.6 factor puts L1 at the 8 NM cap above
+    // ~400 KT, so a 0.15 NM offset commands about 1 deg rather than 1.7 deg.
+    // Set 0 to disable.
+    double lnavL1Factor = 1.6;
     // Heading-direct RF command shaping (787 reference): damp = -gain *
     // (actual track - desired track), clamped to +/- max, then converted to a
     // heading with the wind-correction angle.  Suppresses oscillation and

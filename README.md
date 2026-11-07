@@ -4,7 +4,7 @@
 
 > 独立的 X-Plane 插件，用于增强 FlightFactor 757/767 的 LNAV / VNAV 表现。它**不修改 SASL**、不改机模文件、也不改 FF 的 avionics 插件；只读取 FF757 公开的数据引用，并写入 X-Plane 标准的导航 / 飞行指引目标数据引用。删掉一个文件夹即可完全移除。
 
-当前版本：**v1.2.19**（完整更新见 [`CHANGELOG.md`](CHANGELOG.md)）
+当前版本：**v1.2.21**（完整更新见 [`CHANGELOG.md`](CHANGELOG.md)）
 
 **目录**： [中文](#中文) | [English](#english)
 
@@ -15,7 +15,7 @@
 ### 功能概览
 
 - **RF 定半径弧段**：从 FF757 自己的 `Proc/<ICAO>.txt` 解析真实圆弧（圆心、半径、左/右转），X-Plane CIFP 作为兜底。入弧前由插件沿入弧航道带飞，弧上按"切线 + 径向修正"平滑跟踪，不再是原版 FF757 的多边形拼接。入弧捕获只在飞机真正落在圆上（1.5 NM，接管后 3 NM）时发生，不会在几海里外提前抢弧。
-- **航向直写（全航段，默认）**：所有 LNAV 航段每帧维持 `sim/operation/override/override_nav_heading=1` 并写 `nav_steer_deg_mag`，命令按 787 参考脚本从"期望航迹"换算成"航向"（风补角 `hdg−trk` + 航迹阻尼，限 ±10°）。该模式**不写 FD 滚转**，同一时间只有一个横向控制器；机模每帧把 override 清 0 属正常现象，插件会重新置位。`lnav_heading_direct=0` 时直飞段交还机模、override 只保留在 RF 段；RF 段还可用 `lnav_rf_nav_override=0` 退回 ±4° FD 滚转修正。直飞段的小偏差再用 L1 前视项（`lnav_l1_factor`，默认 0.8）加速收敛，0.15 NM 级别的偏移会在数十秒内压回。
+- **航向直写（全航段，默认）**：所有 LNAV 航段每帧维持 `sim/operation/override/override_nav_heading=1` 并写 `nav_steer_deg_mag`，命令按 787 参考脚本从"期望航迹"换算成"航向"（风补角 `hdg−trk` + 航迹阻尼，限 ±10°）。该模式**不写 FD 滚转**，同一时间只有一个横向控制器；机模每帧把 override 清 0 属正常现象，插件会重新置位。`lnav_heading_direct=0` 时直飞段交还机模、override 只保留在 RF 段；RF 段还可用 `lnav_rf_nav_override=0` 退回 ±4° FD 滚转修正。直飞段的小偏差再用 L1 前视项（`lnav_l1_factor`，默认 1.6）温和加速收敛：0.15 NM 级别的偏移约给 1° 修正，一分钟内压回，不会出现明显摆头。
 - **LNAV 转弯与截获**：Boeing 式捕获——|XTK| ≥ 2.5 NM 时固定 30° 截获，以内按 `atan(xtk/dist)` 直飞修正；按地速与坡度限制计算提前转弯；航向锚定仅在 FMS 与自算航向差 ≤8° 时使用；CDI 校验需连续 ~2 s 不一致才降级，并有 `ROUTE HOLD` 兜底。
 - **航点识别**：以 CDU LEGS 第 1 页第 1 行为"下一个航点"，双向校正索引；辅以 FF757 `AirnavDis/AirnavBrg` 同步与沿航迹投影排序。RF 标注只在（入口→终点）在程序库中确为 RF 对时才成立，不会把别的 SID 的弧套到直飞段。
 - **VNAV 垂直路径**：按约束高度/垂直路径计算所需升降率，叠加垂直加速度阻尼，经低通与限速率写入 FD 俯仰；VNAV SPD（爬升/控速）阶段完全透传。下降（DES）时插件锁定俯仰优先权（`vnav_priority`），消除与机模 VNAV 的逐帧"夺权"。
@@ -82,7 +82,7 @@ FF757 私有航路 dataref 是**未公开**的：插件做尽力绑定，并始�
 3. 启动 X-Plane 并加载 FF757，`Plugins → 757 LNAV/VNAV Plus` 应出现。`Log.txt` 中应能看到：
 
    ```
-   [757LVNAV+] 757 LNAV/VNAV Plus v1.2.19 starting
+   [757LVNAV+] 757 LNAV/VNAV Plus v1.2.21 starting
    [757LVNAV+] FF avionics datarefs: found
    ```
 
@@ -290,8 +290,9 @@ layer** on top of the aircraft's own autopilot.
   normal and is re-asserted. `lnav_heading_direct=0` hands straight legs back to
   the FF757 and keeps the override RF-only; `lnav_rf_nav_override=0` makes the
   RF segment fall back to the ±4° FD-roll nudge. Small straight-leg offsets are
-  closed faster by an L1 look-ahead term (`lnav_l1_factor`, 0.8 default): a
-  0.15 NM offset is corrected in tens of seconds instead of minutes.
+  closed faster by an L1 look-ahead term (`lnav_l1_factor`, 1.6 default): a
+  0.15 NM offset commands about 1° and closes within a minute, without a
+  visible swing.
 - **LNAV capture and turns**: Boeing-style capture - a constant 30° intercept
   beyond 2.5 NM cross-track, direct homing `atan(xtk/dist)` below it; turn
   anticipation from groundspeed and bank limit; FMS course anchoring only
@@ -427,7 +428,7 @@ outbound leg. Every scan writes `CDU scan begin` / `CDU scan done` to
 3. Start X-Plane, load the FF757, and check `Log.txt` for:
 
    ```
-   [757LVNAV+] 757 LNAV/VNAV Plus v1.2.19 starting
+   [757LVNAV+] 757 LNAV/VNAV Plus v1.2.21 starting
    [757LVNAV+] FF avionics datarefs: found
    ```
 
