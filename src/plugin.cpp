@@ -120,6 +120,11 @@ struct SimRefs {
     XPLMDataRef fdPitchLegacy = nullptr;
     XPLMDataRef overridePitch = nullptr;
     XPLMDataRef overrideRoll = nullptr;
+    // Diagnostics for the VNAV pitch-authority investigation: which controller
+    // actually owns the pitch axis.
+    XPLMDataRef apState = nullptr;
+    XPLMDataRef overrideArtstab = nullptr;
+    XPLMDataRef artstabPitch = nullptr;
 
     XPLMDataRef gpsCourse = nullptr;
     XPLMDataRef gpsDist = nullptr;
@@ -237,6 +242,8 @@ double g_lastPitchOut = 0.0;
 bool g_ownPitchOverride = false;
 double g_lastPitchWriteTime = 0.0;
 int g_pitchWriteCount = 0;
+double g_lastVnavServoLog = -1000.0;
+int g_ffPitchOwnCount = 0;
 bool g_cockpit2ProbeDone = false;
 bool g_cockpit2Writable = false;
 float g_lastCockpit2RawOut = 1.0e9f;
@@ -468,6 +475,9 @@ void BindRefs() {
     g_refs.fdPitchLegacy = Find("sim/cockpit/autopilot/flight_director_pitch");
     g_refs.overridePitch = Find("sim/operation/override/override_flightdir_ptch");
     g_refs.overrideRoll = Find("sim/operation/override/override_flightdir_roll");
+    g_refs.apState = Find("sim/cockpit/autopilot/autopilot_state");
+    g_refs.overrideArtstab = Find("sim/operation/override/override_artstab");
+    g_refs.artstabPitch = Find("sim/joystick/artstab_pitch_ratio");
 
     g_refs.gpsCourse = Find("sim/cockpit/radios/gps_course_degtm");
     g_refs.gpsDist = Find("sim/cockpit/radios/gps_dme_dist_m");
@@ -1989,7 +1999,7 @@ float FlightLoopCallback(float elapsedSinceLastCall, float, int, void*) {
         g_navOverrideAtFrameStart = RdI(g_refs.overrideNavHeading);
 
         g_lnav = g_guidance.computeLnav(g_state, g_routeReader.route(), g_cdi, g_config);
-        g_vnav = g_guidance.computeVnav(g_state, g_routeReader.route(), g_config);
+        g_vnav = g_guidance.computeVnav(g_state, g_routeReader.route(), g_config, dt);
 
         bool navWritten = false;
         bool rollWritten = false;
@@ -2127,6 +2137,32 @@ float FlightLoopCallback(float elapsedSinceLastCall, float, int, void*) {
 
         bool pitchWritten = false;
         if (g_config.enableVnav && g_state.apEngaged && g_state.vnavMode) {
+            // The FF757 takes the pitch axis back near approach/landing: the
+            // diagnostics showed servos=0 and override_artstab=1 while the
+            // plugin still held priority and wrote FD pitch (out 8.8 deg).
+            // Release after ~1 s of that state so a single transition frame
+            // cannot start a pitch fight.
+            const bool ffOwnsPitch =
+                (g_refs.overrideArtstab &&
+                 RdI(g_refs.overrideArtstab, 0) != 0) ||
+                (g_refs.servosOn && RdI(g_refs.servosOn, 1) == 0);
+            if (ffOwnsPitch) {
+                ++g_ffPitchOwnCount;
+            } else {
+                g_ffPitchOwnCount = 0;
+            }
+
+            if (ffOwnsPitch && g_ffPitchOwnCount >= 20) {
+                if (g_vnavPriority) {
+                    g_vnavPriority = false;
+                    g_vnavPriorityLogged = false;
+                    g_vnavReleaseCount = 0;
+                    Logf("VNAV pitch released: FF757 owns pitch (servos/artstab)");
+                }
+                ClearPitchOverride();
+                g_status.pitchWritten = false;
+                g_vnav.note += " | FF757 servos/artstab owns pitch";
+            } else {
             // Latch plugin pitch priority while our own vertical path is
             // valid.  Without the latch the plugin drops to pass-through the
             // moment a frame looks "level" or the FD baseline reads near zero,
@@ -2168,11 +2204,35 @@ float FlightLoopCallback(float elapsedSinceLastCall, float, int, void*) {
             } else {
                 ClearPitchOverride();
             }
+            }  // end FF757-owns-pitch guard
         } else {
             g_vnavPriority = false;
             g_vnavPriorityLogged = false;
             g_vnavReleaseCount = 0;
+            g_ffPitchOwnCount = 0;
             ClearPitchOverride();
+        }
+
+        // Periodic pitch-authority diagnostic while the plugin is flying a
+        // vertical path.  It answers whether our legacy FD write sticks and
+        // whether X-Plane's AP (servos) or an artstab override owns pitch.
+        if (g_vnav.active && g_vnav.pathBased &&
+            XPLMGetElapsedTime() - g_lastVnavServoLog > 5.0) {
+            g_lastVnavServoLog = XPLMGetElapsedTime();
+            Logf("VNAV servo: corr=%+.2f out=%.2f legacyRead=%.2f fdC2=%.2f "
+                 "ovrFd=%d apOn=%d servos=%d altMode=%d apState=0x%x "
+                 "ovrArtstab=%d artPitch=%.3f vs=%+.0f req=%+.0f "
+                 "pathErr=%+.0f held=%d",
+                 g_vnav.correctionDeg, g_lastPitchOut,
+                 RdF(g_refs.fdPitchLegacy, NAN),
+                 RdF(g_refs.fdPitchCockpit2, NAN),
+                 RdI(g_refs.overridePitch, 0),
+                 RdI(g_refs.autopilotOn, 0), RdI(g_refs.servosOn, 0),
+                 RdI(g_refs.altitudeMode, 0), RdI(g_refs.apState, 0),
+                 RdI(g_refs.overrideArtstab, 0),
+                 RdF(g_refs.artstabPitch, NAN),
+                 g_state.vsFpm, g_vnav.requiredVsFpm,
+                 g_vnav.pathErrorFt, g_vnav.pathHeld ? 1 : 0);
         }
 
         // A CDU LEGS-page cache is a valid route source on builds that do not

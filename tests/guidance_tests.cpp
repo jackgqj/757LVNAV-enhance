@@ -437,6 +437,44 @@ int main() {
               "floor clamp is what limits the descent");
     }
 
+    // Pitch-authority hysteresis: once the plugin engages on a large VS error
+    // it must keep pitch until the integrated path deviation is small, not
+    // hand it back to the FF757 on the first small-error frame.
+    {
+        RouteSnapshot r = MakeCduRoute();
+        r.wpts[0].altFt = 13500;
+        r.wpts[0].altValid = true;
+        AircraftState s = MakeState(0.0, -0.0833, 90.0);  // ~5 nm before AAA
+        s.altFt = 15000.0;
+        s.gsKts = 400.0;
+
+        Guidance g;
+        // 500 fpm short for 30 s: engages and accumulates ~250 ft.
+        s.vsFpm = -1500.0;
+        VnavResult a = g.computeVnav(s, r, cfg, 30.0);
+        CHECK(a.pathBased && a.pathHeld, "large VS error engages pitch");
+
+        // VS now matches the profile: the 250 ft deviation keeps it engaged.
+        s.vsFpm = -2000.0;
+        VnavResult b = g.computeVnav(s, r, cfg, 30.0);
+        CHECK(b.pathBased && b.pathHeld,
+              "authority held while 250 ft of deviation remains");
+
+        // Descend faster than required to work the deviation off.
+        s.vsFpm = -2600.0;
+        g.computeVnav(s, r, cfg, 30.0);
+        s.vsFpm = -2000.0;
+        VnavResult c = g.computeVnav(s, r, cfg, 30.0);
+        CHECK(c.passThrough && !c.pathHeld,
+              "authority released once deviation and VS error are small");
+
+        // A single small-error frame on a fresh instance must not engage.
+        Guidance fresh;
+        s.vsFpm = -1850.0;  // 150 fpm short
+        VnavResult d = fresh.computeVnav(s, r, cfg, 1.0);
+        CHECK(d.passThrough && !d.pathBased, "150 fpm does not engage");
+    }
+
     // FAR 250/10000 must not arm at cruise for a low-altitude waypoint still
     // 100+ NM ahead (live log: 250 kt target printed at 106 NM).
     {
@@ -476,6 +514,26 @@ int main() {
         CHECK_NEAR(vn.targetAltFt, 15000.0, 1.0, "before TOD holds current altitude");
         CHECK_NEAR(vn.requiredVsFpm, 0.0, 1.0, "before TOD commands zero VS");
         CHECK(vn.note.find("BBB") != std::string::npos, "before-TOD note names the target waypoint");
+    }
+
+    // The same "before TOD" geometry must NOT hold once the aircraft is
+    // already descending: the FF757's VNAV path is live even if the 3-degree
+    // estimate says the fix is farther away.  Live status showed PTH STBY /
+    // ROUTE HOLD with vs=-1619 during a VNAV PTH descent.
+    {
+        RouteSnapshot r = MakeCduRoute();
+        r.wpts[0].altFt = 15000;
+        r.wpts[0].altValid = true;
+        r.wpts[1].altFt = 11000;
+        r.wpts[1].altValid = true;
+        AircraftState s = MakeState(0.0, -0.1, 90.0);  // ~6 nm before AAA
+        s.altFt = 15000.0;
+        s.gsKts = 400.0;
+        s.vsFpm = -1500.0;  // already descending
+        VnavResult vn = guidance.computeVnav(s, r, cfg);
+        CHECK(vn.active && vn.pathBased, "descending before-TOD estimate still flies the path");
+        CHECK_NEAR(vn.targetAltFt, 11000.0, 1.0, "next constraint is the target");
+        CHECK_NEAR(vn.requiredVsFpm, -741.0, 60.0, "required VS for the live descent");
     }
 
     // VNAV descent to the active waypoint, inside the 3-degree TOD window.

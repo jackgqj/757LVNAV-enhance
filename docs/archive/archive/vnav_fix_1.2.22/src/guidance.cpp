@@ -218,6 +218,9 @@ void Guidance::reset() {
     rfLegIdx_ = -1;
     rfLastRadialDeg_ = 0.0;
     rfProgressDeg_ = 0.0;
+    vnavPathHeld_ = false;
+    vnavPathErrorFt_ = 0.0;
+    vnavTargetIndex_ = -1;
 }
 
 // Remaining route distance from a waypoint to the destination, seeded with
@@ -956,8 +959,19 @@ LnavResult Guidance::computeLnav(const AircraftState& state,
 
 VnavResult Guidance::computeVnav(const AircraftState& state,
                                  const RouteSnapshot& route,
-                                 const Config& cfg) {
+                                 const Config& cfg,
+                                 double dtSec) {
     VnavResult out;
+
+    // Any mode change drops the path-authority latch: the deviation estimate
+    // was integrated against a different vertical mode.
+    if (!state.valid || state.onGround || !state.apEngaged ||
+        (!state.vnavMode && !cfg.forceVnav) ||
+        (state.vnavSpeedMode && !cfg.vnavAugmentSpeedMode)) {
+        vnavPathHeld_ = false;
+        vnavPathErrorFt_ = 0.0;
+        vnavTargetIndex_ = -1;
+    }
 
     if (!state.valid) {
         out.note = "aircraft state invalid";
@@ -992,6 +1006,14 @@ VnavResult Guidance::computeVnav(const AircraftState& state,
     bool usedAltitude = false;
     const VnavTarget target = FindVnavTarget(route, state, cfg);
     const SpeedTarget spd = FindSpeedTarget(route, state, cfg);
+    // A different altitude target means a different reference profile: restart
+    // the deviation integral instead of carrying it across the sequencing.
+    if (!target.valid || target.index != vnavTargetIndex_) {
+        vnavPathHeld_ = false;
+        vnavPathErrorFt_ = 0.0;
+        vnavTargetIndex_ = target.valid ? target.index : -1;
+    }
+    out.pathErrorFt = vnavPathErrorFt_;
     if (spd.valid) {
         out.targetSpdKt = static_cast<double>(spd.speedKt);
         out.targetSpdDistNm = spd.distanceNm;
@@ -1051,6 +1073,8 @@ VnavResult Guidance::computeVnav(const AircraftState& state,
         } else if (std::abs(deltaAlt) < 100.0) {
             // The effective target has been clamped to the MCP altitude, or
             // the route constraint is effectively the current altitude.
+            vnavPathHeld_ = false;
+            vnavPathErrorFt_ = 0.0;
             out.active = true;
             out.pathBased = false;
             out.passThrough = true;   // the FF757 owns this level-off
@@ -1072,11 +1096,21 @@ VnavResult Guidance::computeVnav(const AircraftState& state,
                 // target is farther away than that, the aircraft is still
                 // before TOD and should hold altitude rather than start a
                 // shallow, early descent.
+                //
+                // This hold only applies while the aircraft is still level.
+                // Once the FF757 has started its VNAV descent, the path is
+                // live even if the 3-degree estimate says the fix is farther
+                // away; holding there left the plugin in ROUTE HOLD/PTH STBY
+                // with written=0 for most of a descent that the PFD showed as
+                // VNAV PTH (live: vs=-1619, target 31 NM away).
                 const double descentDistance = std::abs(deltaAlt) / 318.0;
-                beforeTod = target.distanceNm > descentDistance + 2.0;
+                beforeTod = target.distanceNm > descentDistance + 2.0 &&
+                            std::abs(state.vsFpm) < 200.0;
             }
 
             if (beforeTod) {
+                vnavPathHeld_ = false;
+                vnavPathErrorFt_ = 0.0;
                 out.active = true;
                 out.pathBased = false;
                 out.passThrough = true;   // level until the FF757 starts the descent
@@ -1147,6 +1181,8 @@ VnavResult Guidance::computeVnav(const AircraftState& state,
                     (oppositeDirection && std::abs(out.requiredVsFpm) > 800.0);
 
                 if (letFF757OwnVertical) {
+                    vnavPathHeld_ = false;
+                    vnavPathErrorFt_ = 0.0;
                     out.active = true;
                     out.pathBased = false;
                     out.passThrough = true;   // FF757 owns the vertical axis
@@ -1161,7 +1197,40 @@ VnavResult Guidance::computeVnav(const AircraftState& state,
                 } else {
                     out.vsErrorFpm = out.requiredVsFpm - state.vsFpm;
 
-                    if (std::abs(out.vsErrorFpm) < 150.0 && speedHoldLead <= 0.0) {
+                    // Integrate the VS disagreement into an altitude deviation
+                    // (ft).  A persistent "above profile" state produces a
+                    // negative integral even when individual frames happen to
+                    // sit inside the VS deadband.
+                    if (dtSec > 0.0) {
+                        vnavPathErrorFt_ += out.vsErrorFpm * dtSec / 60.0;
+                        vnavPathErrorFt_ =
+                            clampd(vnavPathErrorFt_, -6000.0, 6000.0);
+                    }
+                    out.pathErrorFt = vnavPathErrorFt_;
+
+                    // Pitch-authority hysteresis.  The old logic released at
+                    // |vsError| < 150 fpm, which handed pitch back to the
+                    // FF757 on the first small-error frame; it then descended
+                    // at its own (shallower) VNAV rate, the error regrew, and
+                    // the plugin took pitch again.  The net descent stayed
+                    // shallow and the aircraft sat ~1600 ft above the FMC
+                    // profile.  Engage above 200 fpm or 250 ft of deviation,
+                    // release only below 80 fpm AND 120 ft of deviation.
+                    const bool softening = speedHoldLead > 0.0;
+                    bool holdPitch = vnavPathHeld_;
+                    if (holdPitch) {
+                        holdPitch = softening ||
+                                    std::abs(out.vsErrorFpm) >= 80.0 ||
+                                    std::abs(vnavPathErrorFt_) >= 120.0;
+                    } else {
+                        holdPitch = softening ||
+                                    std::abs(out.vsErrorFpm) > 200.0 ||
+                                    std::abs(vnavPathErrorFt_) > 250.0;
+                    }
+                    vnavPathHeld_ = holdPitch;
+                    out.pathHeld = holdPitch;
+
+                    if (!holdPitch) {
                         // Small residual error: leave the FF757's pitch loop
                         // alone instead of injecting a micro-correction that
                         // can turn into a porpoising feedback loop.  But

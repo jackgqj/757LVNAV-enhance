@@ -4,7 +4,7 @@
 
 > 独立的 X-Plane 插件，用于增强 FlightFactor 757/767 的 LNAV / VNAV 表现。它**不修改 SASL**、不改机模文件、也不改 FF 的 avionics 插件；只读取 FF757 公开的数据引用，并写入 X-Plane 标准的导航 / 飞行指引目标数据引用。删掉一个文件夹即可完全移除。
 
-当前版本：**v1.2.21**（完整更新见 [`CHANGELOG.md`](CHANGELOG.md)）
+当前版本：**v1.2.22**（完整更新见 [`CHANGELOG.md`](CHANGELOG.md)）
 
 **目录**： [中文](#中文) | [English](#english)
 
@@ -18,8 +18,8 @@
 - **航向直写（全航段，默认）**：所有 LNAV 航段每帧维持 `sim/operation/override/override_nav_heading=1` 并写 `nav_steer_deg_mag`，命令按 787 参考脚本从"期望航迹"换算成"航向"（风补角 `hdg−trk` + 航迹阻尼，限 ±10°）。该模式**不写 FD 滚转**，同一时间只有一个横向控制器；机模每帧把 override 清 0 属正常现象，插件会重新置位。`lnav_heading_direct=0` 时直飞段交还机模、override 只保留在 RF 段；RF 段还可用 `lnav_rf_nav_override=0` 退回 ±4° FD 滚转修正。直飞段的小偏差再用 L1 前视项（`lnav_l1_factor`，默认 1.6）温和加速收敛：0.15 NM 级别的偏移约给 1° 修正，一分钟内压回，不会出现明显摆头。
 - **LNAV 转弯与截获**：Boeing 式捕获——|XTK| ≥ 2.5 NM 时固定 30° 截获，以内按 `atan(xtk/dist)` 直飞修正；按地速与坡度限制计算提前转弯；航向锚定仅在 FMS 与自算航向差 ≤8° 时使用；CDI 校验需连续 ~2 s 不一致才降级，并有 `ROUTE HOLD` 兜底。
 - **航点识别**：以 CDU LEGS 第 1 页第 1 行为"下一个航点"，双向校正索引；辅以 FF757 `AirnavDis/AirnavBrg` 同步与沿航迹投影排序。RF 标注只在（入口→终点）在程序库中确为 RF 对时才成立，不会把别的 SID 的弧套到直飞段。
-- **VNAV 垂直路径**：按约束高度/垂直路径计算所需升降率，叠加垂直加速度阻尼，经低通与限速率写入 FD 俯仰；VNAV SPD（爬升/控速）阶段完全透传。下降（DES）时插件锁定俯仰优先权（`vnav_priority`），消除与机模 VNAV 的逐帧"夺权"。
-- **VNAV 速度限制**：自动处理 250 KT / 10000 ft 硬限制，并按 1 NM / 10 KT 计算减速提前量（`vnav_speed_limits_enabled` 可关）。
+- **VNAV 垂直路径**：按约束高度/垂直路径计算所需升降率，叠加垂直加速度阻尼，经低通与限速率写入 FD 俯仰；VNAV SPD（爬升/控速）阶段完全透传。下降（DES）时插件锁定俯仰优先权（`vnav_priority`），消除与机模 VNAV 的逐帧"夺权"。CDU 高度限定符按 `A`（at or above）/ `B`（at or below）/ 无后缀（at）分别处理：已满足的 at-or-above 下限不再被当成下降目标，但仍限制下降坡度，避免提前跌破限制。
+- **VNAV 速度限制**：自动处理 250 KT / 10000 ft 硬限制，并按 1 NM / 10 KT 计算减速提前量（`vnav_speed_limits_enabled` 可关）；自动 250 KT 只在进入减速窗口后激活，不会在巡航高度提前几十海里点亮。
 - **RNP / ANP 监控**：按飞行阶段给出 RNP（巡航 2.0 / 终端 1.0 / 最后进近 0.3 NM），`ANP(trk)` 为航迹保持误差代理量；持续超限约 2 s 显示 `NAV UNABLE RNP` 并写日志（仅提示，不干预操纵）。
 - **航路读取**：优先读 FF757 私有 `rteData`；没有时扫描 CDU LEGS 页面（优先右 CDU），解析航点、高度、速度与航段距离，扫完恢复原页面。
 - **性能**：FF757 navdata 每会话只建一次内存索引（16 字节记录，硬上限约 10 MB），之后按 ident 二分查找；飞行循环里没有磁盘扫描。
@@ -82,7 +82,7 @@ FF757 私有航路 dataref 是**未公开**的：插件做尽力绑定，并始�
 3. 启动 X-Plane 并加载 FF757，`Plugins → 757 LNAV/VNAV Plus` 应出现。`Log.txt` 中应能看到：
 
    ```
-   [757LVNAV+] 757 LNAV/VNAV Plus v1.2.21 starting
+   [757LVNAV+] 757 LNAV/VNAV Plus v1.2.22 starting
    [757LVNAV+] FF avionics datarefs: found
    ```
 
@@ -307,9 +307,13 @@ layer** on top of the aircraft's own autopilot.
   vertical-acceleration damping, low-pass filtering and rate limiting into FD
   pitch; VNAV SPD (speed-on-pitch) passes through. During descent the plugin
   latches pitch priority (`vnav_priority`) so it cannot alternate with the
-  FF757's own VNAV.
+  FF757's own VNAV. CDU altitude qualifiers are honoured (`A` = at or above,
+  `B` = at or below, plain = at); a satisfied at-or-above floor is not a
+  descent target, but it still limits the descent gradient so the path cannot
+  cross it below its minimum.
 - **VNAV speed limits**: 250 KT below 10000 ft and a 1 NM per 10 KT decel lead
-  (`vnav_speed_limits_enabled` turns it off).
+  (`vnav_speed_limits_enabled` turns it off); the automatic 250 KT target arms
+  only inside the deceleration window, not tens of miles early at cruise.
 - **RNP/ANP monitoring**: RNP by phase (2.0 enroute / 1.0 terminal / 0.3 final),
   `ANP(trk)` as a track-keeping proxy; sustained exceedance shows
   `NAV UNABLE RNP` and logs it (monitoring only).
@@ -428,7 +432,7 @@ outbound leg. Every scan writes `CDU scan begin` / `CDU scan done` to
 3. Start X-Plane, load the FF757, and check `Log.txt` for:
 
    ```
-   [757LVNAV+] 757 LNAV/VNAV Plus v1.2.21 starting
+   [757LVNAV+] 757 LNAV/VNAV Plus v1.2.22 starting
    [757LVNAV+] FF avionics datarefs: found
    ```
 

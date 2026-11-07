@@ -22,6 +22,24 @@ Fixes VNAV descent fighting the FMC profile.
   straight line to the next hard target no longer crosses the floor fix below
   its published minimum (the status note says "at-or-above floor kept" when
   this limit is active).
+- VNAV pitch authority now uses hysteresis and an integrated path deviation.
+  The old logic released at `|vsError| < 150 fpm`, so the FF757 took pitch
+  back on the first small-error frame, descended at its own shallower rate,
+  and the plugin re-engaged; the aircraft stayed above the FMC profile (live
+  report: 1630 ft high while `PTH ACTIVE`, `reqVS=-3078`, `vs=-1920`).
+  Engage now needs 200 fpm or 250 ft of deviation, release needs 80 fpm AND
+  120 ft.  A throttled `VNAV servo` diagnostic line (corr, FD write readback,
+  AP/servo state, artstab override, path error) is logged every 5 s to show
+  which controller actually owns pitch.
+- The pre-TOD hold now applies only while the aircraft is level.  A live VNAV PTH
+  descent (vs=-1619, next constraint 31 NM away) was held in `ROUTE HOLD` /
+  `PTH STBY` with `written=0` because the 3-degree TOD estimate said the fix was
+  still 8 NM beyond TOD; once the FF757 has started down, the plugin now follows
+  the path instead of standing by.
+- Pitch authority is released when X-Plane's AP servos are off or
+  `override_artstab=1` for about 1 s.  The `VNAV servo` log showed
+  `servos=0 ovrArtstab=1` near approach while the plugin still held priority
+  and wrote 8.8 deg of FD pitch into an axis the FF757 had taken back.
 - Fixes a crash while reading the FF757 procedure database
   (`Custom Data/STSFF/navdata/Proc/<ICAO>.txt`).  Those files separate
   procedure blocks with blank lines, and `ParseFfProcLines` read field 1 of

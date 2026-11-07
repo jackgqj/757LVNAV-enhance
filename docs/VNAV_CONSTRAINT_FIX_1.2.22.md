@@ -160,7 +160,7 @@ if (to10k <= autoLead + 1.0) { limit = 250; autoFlag = true; }
 
 | 测试 | 检查数 | 结果 |
 | --- | --- | --- |
-| `guidance_tests` | 158 | 0 failures |
+| `guidance_tests` | 165 | 0 failures |
 | `cdu_tests` | 39 | 0 failures |
 | `cifp_tests` | 18 | 0 failures |
 
@@ -213,20 +213,102 @@ if (p.size() < 2) { prevIdent.clear(); continue; }
 
 验证：用修复后的解析器直接读取真实
 `Custom Data/STSFF/navdata/Proc/ZSPD.txt` 与 `ZSNJ.txt`，正常完成
-（3510/827 行，0 条 RF 弧，无崩溃）。三套测试仍为 158 / 39 / 18。
+（3510/827 行，0 条 RF 弧，无崩溃）。三套测试为 165 / 39 / 18。
+
+## 附：VNAV 俯仰权限与“高于剖面 1630 ft”
+
+实测：`PTH ACTIVE`、`reqVS=-3078`、`vs=-1920`，PFD/ND 垂直偏差
+1630 ft 高于 FMC 剖面。日志显示插件在 `ROUTE PROFILE` 与 `FD PASS`
+之间反复切换：
+
+```
+VNAV authority: source=ROUTE PROFILE ... corr=-0.35 ... plugin pitch priority
+VNAV authority: source=FD PASS ... vertical path within deadband; FF757 owns pitch
+VNAV authority: source=ROUTE PROFILE ... corr=-0.33 ...
+```
+
+原因：旧死区在 `|vsError| < 150 fpm` 时立即交出俯仰；FF757 用自己的
+（更浅的）VNAV 速率接管，偏差重新变大后插件再次接管。净下降率仍停留在
+FF757 的速率，飞机长期高于剖面。
+
+改动：
+
+- `Guidance` 新增 `vnavPathHeld_` / `vnavPathErrorFt_`。后者把
+  `vsError * dt / 60` 积分成高度偏差（负值 = 高于剖面，限 ±6000 ft），
+  目标航点变化或模式切换时清零。
+- 俯仰权限带迟滞：接管需要 `|vsError| > 200 fpm` 或偏差 `> 250 ft`；
+  释放需要 `|vsError| < 80 fpm` **且** 偏差 `< 120 ft`。软化的 DECEL
+  段始终保留权限。
+- `computeVnav` 增加 `dtSec` 参数（测试默认 0，不积分）。
+- 插件每 5 s 在 `Output/757LVNAVPlus.log` 写一条 `VNAV servo` 诊断：
+  `corr`、我们写入的 FD 俯仰 `out`、legacy 回读、cockpit2 FD、override
+  `/flightdir`、X-Plane AP 与伺服状态、`override_artstab` /
+  `artstab_pitch_ratio`、`vs` / `req` / `pathErr` / `held`。这条日志用于
+  确认俯仰写入是否真正生效，以及是 X-Plane AP 还是机模 artstab 在控制俯仰。
+
+验证（新测试）：
+
+- 500 fpm 误差持续 30 s → 接管并累计约 250 ft。
+- 之后 VS 与剖面一致，但 250 ft 偏差仍存在 → 继续保持权限。
+- 反向修正把偏差抹平后 → 释放为 `FD PASS`。
+- 单帧 150 fpm 误差（新实例）→ 不接管。
+
+### 4b. “before TOD” 只在平飞时成立
+
+同一现象的另一个来源：状态窗显示 `PTH STBY` / `src=ROUTE HOLD`、
+`reqVS=+0`、`vs=-1619`、`written=0`，而 PFD FMA 明确是 `VNAV PTH`，
+下一个限制 ESBAG 11900 ft 在 31.2 NM 外。旧逻辑用 318 ft/NM 估算
+“3° 需要 23.6 NM”，认为还在 TOD 之前就保持高度透传；但飞机已经在下降，
+FMC 的垂直路径是活的。
+
+修正：`beforeTod` 追加 `|vsFpm| < 200 ft/min` 条件——只有真正平飞时才
+保持；一旦已经开始下降，就按路径计算所需下降率（该例中
+`req ≈ -1541 fpm`，与实际 -1619 接近，进入释放死区，仍安全透传；
+若高于剖面则立即接管修正）。
+
+新增测试：同样的 before-TOD 几何、`vs=-1500` 时不再保持，而是
+`pathBased`，目标为下一个限制，`reqVS ≈ -741 fpm`。
+
+### 4c. 进近阶段交还俯仰
+
+`VNAV servo` 日志末尾出现 `servos=0`、`ovrArtstab=1`，说明 FF757 已经
+接管俯仰（进近/自动落地），而插件仍在 `held=1` 下写入 `out=8.88°/7.43°`
+的 FD 俯仰。现在插件在该状态持续约 1 秒（20 帧）后释放权限并清空
+override，不再与机模争抢。
+
+### 4d. 日志实测结论（220 条 `VNAV servo`）
+
+- **写入生效**：`legacyRead = out = fdC2`，`ovrFd=1`、`apOn=1`、`servos=1`、
+  `ovrArtstab=0`；俯仰命令确实进入 X-Plane AP，`cockpit2` 与 legacy 同值。
+- **下降段跟随良好**：典型 `vs=-674/req=-669`、`vs=-686/req=-677`，
+  修正量仅 ±0.05°；`pathErr` 长期在 -150 ft 左右（略高于剖面），
+  相比之前的 1630 ft 已大幅收敛。
+- **仍有大偏差的时段**：`pathErr` 范围 -342 ~ +1412 ft。多数来自高度截获
+  （`req≈-1` 而 `vs=-1460`，插件抬头把下降率拉平）和航点切换瞬间；
+  积分在目标切换处已清零，但截获段的暂态仍会积累。
+- **出现爬升指令**：末尾 `req=+658/+300`。该航路含明显错误的航点
+  （`FF24`/`ZSNJ24` 被解析到 -23°、`(660)`/`(4930)` 被当成航点 ident，
+  其中一条高度 66000 ft），目标高度跳变会让插件要求爬升。属于 CDU
+  航路解析/导航数据匹配问题，需单独修复。
 
 ## 构建产物（1.2.22，含崩溃修复）
 
-- `win.xpl`：1,114,112 字节
-- SHA256：`782B19AE53AD27B45D40062CDD04522895280A063445070A9E4E001A9E29CCBD`
+- `win.xpl`：1,116,672 字节
+- SHA256：`0A23DC42F9E4666C0D8DE5B6F7B9EF9DAF4E5DD30D8F221B99C299E355F244F3`
 - 安装位置：`plugins\757LVNAVPlus\64\win.xpl`
-- 发布 zip：511,019 字节
-- zip SHA256：`303614C8CE806F90EE85DDCAF51750C21385D60FB374A59E20D8FC7B08ABD99B`
+- 发布 zip：512,878 字节
+- zip SHA256：`83666AF5781D61A72B94A745F29AFFDB29B26CA57309FA3FDD32D67DBFBB0250`
   （包内 DLL 与上面一致）
 
 > 中间版本（限定符 + 坡度保护，但 Proc 解析仍会崩溃）为
-> `2164FD8A5B94C380F04D829D23B7402EAB8A383A01E774DF81839BA964C2D1A0`，
-> 已作废，不要使用。
+> `2164FD8A5B94C380F04D829D23B7402EAB8A383A01E774DF81839BA964C2D1A0`；
+> 含崩溃修复、但无权限迟滞的版本为
+> `782B19AE53AD27B45D40062CDD04522895280A063445070A9E4E001A9E29CCBD`；
+> 含权限迟滞、但 before-TOD 仍会在下降中透传的版本为
+> `A62E3CA15A6321F667B5F6B6D1A1A0B1E8EA038539BA40CCF96BA32FC7661DB2`；
+> 含 before-TOD 修复、但进近阶段未交还俯仰的版本为
+> `43985412F15046382992C2F436EB3F77B0F79D2786A7C8109FB425544546648C`。
+> 以上均已作废，不要使用。
 
 ## 回滚与归档
 

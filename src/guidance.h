@@ -69,6 +69,12 @@ struct VnavResult {
     double requiredVsFpm = 0.0;
     double vsErrorFpm = 0.0;
     double correctionDeg = 0.0;
+    // Integrated vertical-path deviation (ft, negative = above the profile).
+    // Used to hold pitch authority while the aircraft is genuinely off path
+    // instead of releasing into the FD deadband and handing pitch back to the
+    // FF757 on the first small VS-error frame.
+    double pathErrorFt = 0.0;
+    bool pathHeld = false;
     // Speed-limit summary (FAR 250 KT below 10000 ft or DECEL point).  Used
     // for the status window and for pitch softening so the path ends at the
     // constraint at the right speed instead of forcing a hard brake at the
@@ -89,7 +95,8 @@ public:
 
     VnavResult computeVnav(const AircraftState& state,
                            const RouteSnapshot& route,
-                           const Config& cfg);
+                           const Config& cfg,
+                           double dtSec = 0.0);
 
     void reset();
 
@@ -129,6 +136,15 @@ private:
     int rfLegIdx_ = -1;
     double rfLastRadialDeg_ = 0.0;
     double rfProgressDeg_ = 0.0;
+
+    // VNAV pitch-authority state.  vnavPathHeld_ keeps the plugin on pitch
+    // after a correction starts, with hysteresis, until both the VS error and
+    // the integrated path deviation are small.  vnavPathErrorFt_ integrates
+    // vsError (ft, negative = above profile) so a small instantaneous error
+    // cannot hide a persistent altitude deviation.
+    bool vnavPathHeld_ = false;
+    double vnavPathErrorFt_ = 0.0;
+    int vnavTargetIndex_ = -1;
 
     // Shared RNP/ANP monitor: phase RNP selection, ANP low-pass and the
     // hysteresis alert.  absLateralErrNm is |cross-track| on straight legs or
