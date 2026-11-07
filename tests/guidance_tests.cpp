@@ -210,7 +210,10 @@ int main() {
     }
 
     // CDI fallback: positive dot is interpreted as a right correction.
+    // A fresh Guidance is used because the route hold keeps the previous
+    // route command alive for ~1 s after the snapshot disappears.
     {
+        Guidance gCdi;
         RouteSnapshot empty;
         AircraftState s = MakeState(0.0, 0.0, 90.0);
         CdiInput cdi;
@@ -218,10 +221,37 @@ int main() {
         cdi.courseMagDeg = 90.0;
         cdi.distanceNm = 10.0;
         cdi.xtkNm = 0.5;
-        LnavResult ln = guidance.computeLnav(s, empty, cdi, cfg);
+        LnavResult ln = gCdi.computeLnav(s, empty, cdi, cfg);
         CHECK(ln.active, "CDI fallback active");
         CHECK(ln.cdiFallback, "CDI fallback flag");
         CHECK(ln.desiredCourseMagDeg > 90.0, "positive dot -> turn right");
+    }
+
+    // With no route ever seen, the hold does not engage: after a valid route
+    // has been lost for more than the hold window, CDI steering takes over.
+    {
+        Guidance gHold;
+        RouteSnapshot r = MakeRoute();
+        CdiInput cdi;
+        AircraftState onRoute = MakeState(0.0, 0.5, 90.0);
+        gHold.computeLnav(onRoute, r, cdi, cfg);          // seed the hold
+
+        RouteSnapshot empty;
+        AircraftState s = MakeState(0.0, 0.5, 90.0);
+        cdi.valid = true;
+        cdi.courseMagDeg = 90.0;
+        cdi.distanceNm = 10.0;
+        cdi.xtkNm = 0.5;
+        LnavResult ln;
+        int heldFrames = 0;
+        for (int i = 0; i < 30; ++i) {
+            ln = gHold.computeLnav(s, empty, cdi, cfg);
+            if (ln.source == "ROUTE HOLD") ++heldFrames;
+        }
+        CHECK(heldFrames >= 15 && heldFrames <= 22,
+              "route hold covers ~20 frames before CDI takes over");
+        CHECK(ln.cdiFallback,
+              "CDI takes over only after the hold window expires");
     }
 
     // A CDU LEGS cache that starts at the active waypoint has no inbound fix
@@ -247,6 +277,7 @@ int main() {
     // CDI sign calibration against the FF757's FD roll.  Negative dot with a
     // right bank must eventually flip to a right correction.
     {
+        Guidance gCdiSign;
         RouteSnapshot empty;
         AircraftState s = MakeState(0.0, 0.0, 90.0);
         s.fdRollDeg = 15.0;
@@ -257,9 +288,9 @@ int main() {
         cdi.xtkNm = -0.5;
         LnavResult ln;
         for (int i = 0; i < 12; ++i) {
-            ln = guidance.computeLnav(s, empty, cdi, cfg);
+            ln = gCdiSign.computeLnav(s, empty, cdi, cfg);
         }
-        CHECK(guidance.cdiSign() == -1, "FD roll calibrates CDI sign");
+        CHECK(gCdiSign.cdiSign() == -1, "FD roll calibrates CDI sign");
         CHECK(ln.desiredCourseMagDeg > 90.0, "calibrated CDI dot turns right");
     }
 
@@ -594,6 +625,10 @@ int main() {
         rf.rfRadialEndDeg = 180.10;     // centre -> SEGAW
         rf.rfTotalSweptDeg = 72.13;
         rf.rfEntryWpt = 1;
+        rf.rfEntryId = "HEGEM";
+        rf.rfEntryLat = 47.646133;
+        rf.rfEntryLon = -122.459689;
+        rf.rfEntryValid = true;
         return r;
     };
 
@@ -701,6 +736,120 @@ int main() {
         LnavResult ln = g.computeLnav(s, r, cdi, cfg);
         CHECK(ln.active && ln.source == "RF ARC",
               "RF annotation on a straight CDU leg still tracks the arc");
+    }
+
+    // RF capture gate: the leg becomes active many miles before the arc entry.
+    // The FF757 cannot fly RF legs, so the plugin must fly the inbound course
+    // to the entry fix itself (lead-in) instead of handing the leg back.
+    {
+        Guidance g;
+        RouteSnapshot r = MakeRfRoute(true);
+        CdiInput cdi;
+        // 8 NM before HEGEM along the inbound course (162.23 true).
+        double lat = 0.0, lon = 0.0;
+        destinationPoint(r.wpts[1].lat, r.wpts[1].lon,
+                         normalize360(162.23 + 180.0), 8.0, lat, lon);
+        AircraftState s = MakeState(lat, lon, 162.0);
+        LnavResult ln = g.computeLnav(s, r, cdi, cfg);
+        CHECK(ln.active, "RF lead-in is flown by the plugin, not handed back");
+        CHECK(ln.note.find("RF arc lead-in") != std::string::npos,
+              "note reports the RF lead-in");
+        CHECK_NEAR(ln.desiredCourseMagDeg, 162.2, 2.5,
+                   "lead-in follows the inbound course to the entry fix");
+        CHECK(std::abs(ln.distanceNm - 8.0) < 1.0,
+              "lead-in distance counts to the arc entry fix");
+    }
+
+    // The FF757's own route is unreliable on RNP segments, so the arc must not
+    // be gated by the FMS course: purely geometric capture.
+    {
+        Guidance g;
+        RouteSnapshot r = MakeRfRoute(true);
+        CdiInput cdi;
+        cdi.valid = true;
+        cdi.courseMagDeg = normalize360(162.23 - 60.0);   // FMS disagrees by 60 deg
+        cdi.distanceNm = 3.15;
+        cdi.xtkNm = 0.0;
+        AircraftState s = MakeState(47.646133, -122.459689, 162.0);
+        LnavResult ln = g.computeLnav(s, r, cdi, cfg);
+        CHECK(ln.active && ln.source == "RF ARC",
+              "RF arc ignores the FMS course and captures from geometry alone");
+        CHECK(ln.note.find("(course from FMS)") == std::string::npos,
+              "RF tracking does not claim an FMS course anchor");
+    }
+
+    // On the circle at the entry the arc still captures (regression guard).
+    {
+        Guidance g;
+        RouteSnapshot r = MakeRfRoute(true);
+        CdiInput cdi;
+        cdi.valid = true;
+        cdi.courseMagDeg = 162.23;
+        cdi.distanceNm = 3.15;
+        cdi.xtkNm = 0.0;
+        AircraftState s = MakeState(47.646133, -122.459689, 162.0);
+        LnavResult ln = g.computeLnav(s, r, cdi, cfg);
+        CHECK(ln.active && ln.source == "RF ARC",
+              "RF arc captures on the circle at the entry with an agreeing FMS course");
+    }
+
+    // CDU cache style route: the snapshot starts at the active waypoint, so an
+    // RF leg can be active with its entry fix absent.  Guidance must still fly
+    // the lead-in and capture the arc, using the entry coordinates from CIFP.
+    {
+        RouteSnapshot r;
+        r.valid = true;
+        r.sourceRoute = true;
+        r.wptCount = 2;
+        r.legCount = 1;
+        r.activeWpt = 0;                 // LS-type cache: starts at the exit
+        r.activeLeg = 0;
+        r.nextLeg = -1;
+        r.wpts.resize(2);
+        r.wpts[0].lat = 47.609656; r.wpts[0].lon = -122.385864; r.wpts[0].id = "SEGAW";
+        r.wpts[1].lat = 47.559656; r.wpts[1].lon = -122.385864; r.wpts[1].id = "NEXT";
+        r.wpts[0].posValid = true; r.wpts[1].posValid = true;
+
+        RouteLeg leg;
+        leg.type = 0;
+        leg.firstWpt = 0;
+        leg.lastWpt = 0;
+        leg.complex = true;
+        leg.rfArc = true;
+        leg.rfRadiusNm = 3.150;
+        leg.rfCenterLat = 47.662125;
+        leg.rfCenterLon = -122.385728;
+        leg.rfTurn = -1;
+        leg.rfRadialStartDeg = 252.23;
+        leg.rfRadialEndDeg = 180.10;
+        leg.rfTotalSweptDeg = 72.13;
+        leg.rfEntryWpt = -1;             // entry fix not in the snapshot
+        leg.rfEntryId = "HEGEM";
+        leg.rfEntryLat = 47.646133;
+        leg.rfEntryLon = -122.459689;
+        leg.rfEntryValid = true;
+        r.legs.push_back(leg);
+
+        Guidance gLead;
+        CdiInput cdi;
+        double lat = 0.0, lon = 0.0;
+        destinationPoint(leg.rfEntryLat, leg.rfEntryLon,
+                         normalize360(162.23 + 180.0), 8.0, lat, lon);
+        AircraftState s = MakeState(lat, lon, 162.0);
+        LnavResult ln = gLead.computeLnav(s, r, cdi, cfg);
+        CHECK(ln.active, "RF lead-in works without the entry fix in the route");
+        CHECK(ln.note.find("RF arc lead-in to HEGEM") != std::string::npos,
+              "lead-in note names the CIFP entry fix");
+        CHECK_NEAR(ln.desiredCourseMagDeg, 162.2, 2.5,
+                   "lead-in course comes from the arc entry tangent");
+        CHECK(std::abs(ln.distanceNm - 8.0) < 1.0,
+              "lead-in distance counts to the CIFP entry point");
+
+        Guidance gArc;
+        AircraftState onCircle = MakeState(leg.rfEntryLat, leg.rfEntryLon, 162.0);
+        LnavResult ln2 = gArc.computeLnav(onCircle, r, cdi, cfg);
+        CHECK(ln2.active && ln2.source == "RF ARC",
+              "arc captures at the entry even without the entry waypoint");
     }
 
     // --- VNAV: speed-limit (DECEL) handling ---

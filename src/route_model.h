@@ -38,7 +38,14 @@ struct RouteLeg {
     double rfRadialStartDeg = 0.0;  // bearing centre -> entry fix
     double rfRadialEndDeg = 0.0;    // bearing centre -> exit fix
     double rfTotalSweptDeg = 0.0;   // signed turn direction applied, 5..355
-    int rfEntryWpt = -1;          // index of the arc entry waypoint
+    int rfEntryWpt = -1;          // index of the arc entry waypoint, -1 if absent
+    // The arc entry fix resolved from CIFP.  The CDU LEGS cache starts at the
+    // active waypoint, so an RF leg can be active without its entry fix in the
+    // snapshot; the geometry is still usable from these coordinates.
+    std::string rfEntryId;
+    double rfEntryLat = 0.0;
+    double rfEntryLon = 0.0;
+    bool rfEntryValid = false;
 };
 
 struct RouteSnapshot {

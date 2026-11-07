@@ -53,7 +53,7 @@
 | `Aircraft: FF757/767` | 是否正确识别为 FF 机模 |
 | `AP : mode / roll / pitch / vnavPhase` | FF757 原始自动驾驶模式值 |
 | `engaged / lnavMode / vnavMode` | 插件识别到的 AP、LNAV、VNAV 状态 |
-| `LNAV : ACTIVE src=ROUTE` | LNAV 正在写入；`src` 表示来源（`ROUTE` / `ROUTE/SYNTH` / `RF ARC` / GPS CDI） |
+| `LNAV : ACTIVE src=ROUTE` | LNAV 正在写入；`src` 表示来源（`ROUTE` / `ROUTE/SYNTH` / `ROUTE HOLD` / `RF ARC` / GPS CDI） |
 | `xtk / dist / base / target / corr` | 偏航距、距下一航点距离、基准航向、目标航向、修正量 |
 | `turn=..%` / `RFarc=..%` | 转弯进度；RF 定半径弧段时显示弧线进度 |
 | `active #n -> next #n` | 当前生效航点与下一航点序号 |
@@ -68,7 +68,7 @@
 - **`SPD STBY` / `PTH STBY` 是正常的待命状态**：前者是 VNAV SPD（爬升/速度保持，靠俯仰控速），后者通常是 VNAV PTH 但正保持 MCP 高度、尚未到 TOD 或误差在死区内。插件只是不写俯仰，模式已经被识别。
 - 只有 `VNAV : ACTIVE` 时才会看到俯仰修正。
 - **下降（DES）时插件独占俯仰**：机模自己的 VNAV 和插件都写同一个 FD 俯仰 dataref，逐帧互相覆盖就会"夺权"抖动。插件在拿到有效垂直路径的那一帧就锁定优先权（状态窗 notes 显示 `plugin pitch priority`），持续写入，直到垂直路径失效连续约 2 秒才释放。想让机模优先就把 `vnav_priority=0`。
-- **RF 定半径弧段（如西雅图 RNAV RNP 进近）**：插件从 X-Plane 的 CIFP 程序数据库解析真实的圆弧（圆心、半径、转向），沿切线航向平滑跟踪整段弧，而不是像原版 FF757 那样飞成多边形。状态窗 `src` 显示 `RF ARC`，日志会给出半径、剩余弧度数和当前地速所需坡度；若所需坡度超过 `lnav_max_bank_deg` 会标注提醒（弧仍会跟踪，但过小的半径在高速下可能保持不住）。可用 `lnav_rf_enabled=0` 关闭，退回原版透传。
+- **RF 定半径弧段（如西雅图 RNAV RNP 进近、拉萨 EO28R 离场）**：插件从 X-Plane 的 CIFP 程序数据库解析真实的圆弧（圆心、半径、转向），沿切线航向平滑跟踪整段弧，而不是像原版 FF757 那样飞成多边形。**FF757 原生不会飞 RF，所以整段（含入弧前）都由插件带飞**：入弧前沿入弧航道飞向入弧点（状态窗提示 `RF arc lead-in to <fix>`，不做 fly-by 提前转弯，因为圆弧与入弧航道相切）；到达入弧径向且飞机真的在圆上（偏差 1.5 NM 内，已接管后放宽到 3 NM）时切换为圆弧跟踪。**RF 段完全不参考 FF757 的 FMS 航路**（机模在 RNP 段的航路计算不可靠）：入弧前不做航向锚定，也不做 CDI 航向/距离校验，弧的捕获只依据 CIFP 几何。接管后状态窗 `src` 显示 `RF ARC`，日志会给出半径、剩余弧度数和当前地速所需坡度；若所需坡度超过 `lnav_max_bank_deg` 会标注提醒（弧仍会跟踪，但过小的半径在高速下可能保持不住）。可用 `lnav_rf_enabled=0` 关闭，退回原版透传。FF757 常把 `override_nav_heading` 保持为 0，仅写导航目标无法维持半径，因此 RF 弧段还会额外给 FD 滚转加一个**最大 ±4°** 的修正（只作用于该弧段，全局 `lnav_fd_roll` 仍保持关闭，状态窗显示 `RF arc FD roll (max 4 deg)`）；不需要就设 `lnav_rf_fd_roll=0`。RF 弧段默认采用**航向直写**（`lnav_rf_nav_override=1`）：每帧维持 `sim/operation/override/override_nav_heading=1` 并写 `nav_steer_deg_mag`；指令按参考的 787 脚本做法从"期望航迹"换算成"航向"——加风补角 `hdg − trk`，再加航迹阻尼 `−0.35×(trk − 期望航迹)`（限 ±10°，可用 `lnav_track_damp_gain` / `lnav_track_damp_max_deg` 调整）。机模每帧把该标志清 0 属正常现象，插件照常重新置 1（不再因此放弃）。此模式下**完全不写 FD 滚转**，保证同一时间只有一个横向控制器——1.2.12 的异常盘旋正是"override 与 FD 滚转同时接管"造成的。状态窗显示 `RF arc: heading direct (override=1)`。设 `lnav_rf_nav_override=0` 则退回 ±4° 滚转修正。
 
 ## 4. 航路扫描规则
 
@@ -203,7 +203,7 @@ It does not modify SASL, aircraft files, or the FF avionics plugin.
 | `Aircraft: FF757/767` | Aircraft detected correctly |
 | `AP : mode / roll / pitch / vnavPhase` | Raw FF757 autopilot mode values |
 | `engaged / lnavMode / vnavMode` | States detected by the plugin |
-| `LNAV : ACTIVE src=ROUTE` | LNAV is writing; `src` is the source (`ROUTE` / `ROUTE/SYNTH` / `RF ARC` / GPS CDI) |
+| `LNAV : ACTIVE src=ROUTE` | LNAV is writing; `src` is the source (`ROUTE` / `ROUTE/SYNTH` / `ROUTE HOLD` / `RF ARC` / GPS CDI) |
 | `xtk / dist / base / target / corr` | Cross-track, distance to fix, base course, target course, correction |
 | `turn=..%` / `RFarc=..%` | Turn progress; on RF constant-radius legs this is the arc progress |
 | `active #n -> next #n` | Active and next waypoint indices |
@@ -226,15 +226,40 @@ Key points:
   valid vertical path (the notes show `plugin pitch priority`), keeps writing
   and releases only after ~2 s of inactivity. Set `vnav_priority=0` to hand
   priority back to the FF757.
-- **RF constant-radius legs** (e.g. the Seattle RNAV RNP approaches): the plugin
-  resolves the true arc from X-Plane's CIFP procedure database (centre, radius,
-  turn direction) and tracks the tangent course smoothly along the whole arc
-  instead of the stock FF757's polygon chain. The status window shows
+- **RF constant-radius legs** (e.g. the Seattle RNAV RNP approaches, Lhasa
+  EO28R departure): the plugin resolves the true arc from X-Plane's CIFP
+  procedure database (centre, radius, turn direction) and tracks the tangent
+  course smoothly along the whole arc instead of the stock FF757's polygon
+  chain. **The FF757 cannot fly RF at all, so the plugin owns the whole leg,
+  including the lead-in**: before the entry it flies the inbound course to the
+  entry fix (`RF arc lead-in to <fix>`, no fly-by anticipation because the arc
+  is tangent to the inbound course), then switches to arc tracking at the
+  entry radial once the aircraft is on the circle (1.5 NM band, 3 NM once
+  tracking). **The RF segment does not reference the FF757 FMS route at all**:
+  the model's route computation is unreliable on RNP legs, so no course
+  anchoring and no CDI course/distance validation runs there; the arc is
+  captured from CIFP geometry alone. Once engaged the status window shows
   `src=RF ARC`; the log reports radius, degrees remaining and the bank angle
   the published radius needs at the current groundspeed (flagged when it
   exceeds `lnav_max_bank_deg` - the arc is still tracked, but a very tight
-  radius cannot be held at high speed). Set `lnav_rf_enabled=0` to pass RF
-  legs through to the stock behaviour.
+  radius cannot be held at high speed). The FF757 usually keeps
+  `override_nav_heading` at 0, so the nav target alone cannot hold the radius;
+  on RF arcs the plugin therefore adds up to **±4°** of roll to the FD roll
+  baseline it already reads (that arc only - the global `lnav_fd_roll` stays
+  off; the note reads `RF arc FD roll (max 4 deg)`). Set `lnav_rf_fd_roll=0`
+  to leave roll entirely to the model. On RF arcs the default is
+  **heading-direct guidance** (`lnav_rf_nav_override=1`): the plugin holds
+  `sim/operation/override/override_nav_heading=1` and writes
+  `nav_steer_deg_mag` every frame. Following the 787 reference script, the
+  desired track is converted to a heading with the wind-correction angle
+  (`hdg - trk`) plus track damping `-0.35 x (trk - desired track)` (clamped to
+  ±10°, tunable with `lnav_track_damp_gain` / `lnav_track_damp_max_deg`). The
+  model clearing the flag each frame is normal; the plugin re-asserts it.
+  FD roll is **not** written in this mode, so only one lateral controller
+  commands roll - writing both was what produced the 1.2.12 circling. The
+  status note reads `RF arc: heading direct (override=1)`. Set
+  `lnav_rf_nav_override=0` to fall back to the ±4° FD roll nudge.
+  Set `lnav_rf_enabled=0` to pass RF legs through to the stock behaviour.
 
 ## 4. Route scanning rules
 

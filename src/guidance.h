@@ -100,6 +100,20 @@ private:
     int cdiDisagreeCount_ = 0;
     int fdRollDisagreeCount_ = 0;
 
+    // CDI cross-check hysteresis.  A single frame of disagreement (route
+    // rescan, sequencing, a lagging FMS course) must not drop LNAV to GPS CDI
+    // steering; both checks need ~2 s of continuous disagreement.
+    int cdiCourseRejectCount_ = 0;
+    int cdiDistRejectCount_ = 0;
+
+    // Short route gap: hold the last route-based command for ~1 s when the
+    // snapshot is momentarily unusable instead of falling back to CDI dots.
+    bool holdValid_ = false;
+    int holdFrames_ = 0;
+    double holdCourseMagDeg_ = 0.0;
+    double holdXtkNm_ = 0.0;
+    double holdDistNm_ = 0.0;
+
     // ANP estimator: low-passed mean |cross-track|, doubled for a ~95%
     // containment proxy.  The alert uses hysteresis so a noisy edge does not
     // flash the message.

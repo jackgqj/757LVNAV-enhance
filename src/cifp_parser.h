@@ -37,9 +37,20 @@ public:
 
     bool findRfArc(const std::string& entryIdent, const std::string& exitIdent,
                    double anchorLat, double anchorLon, RfArcRow& out);
+    // Exit-only lookup: used when the entry fix is not in the route snapshot
+    // (the CDU LEGS cache starts at the active waypoint).  Returns the first
+    // arc that terminates at `exitIdent`.
+    bool findRfArcByExit(const std::string& exitIdent, double anchorLat,
+                         double anchorLon, RfArcRow& out);
 
     // Pure parser, exposed for unit tests.
     static std::vector<RfArcRow> ParseCifpLines(const std::vector<std::string>& lines);
+    // Parser for the FF757's own procedure database
+    // (Custom Data/STSFF/navdata/Proc/<ICAO>.txt).  Its RF rows carry the
+    // direction the FMS itself uses (1 = left / 2 = right, i.e. the CDU's
+    // ARC LEFT / ARC RIGHT), plus centre fix, course and radius, so it is
+    // preferred over CIFP when both describe the same arc.
+    static std::vector<RfArcRow> ParseFfProcLines(const std::vector<std::string>& lines);
 
 private:
     struct AirportFix {
@@ -50,11 +61,15 @@ private:
 
     void loadAirports();
     const std::vector<RfArcRow>& arcsForAirport(const std::string& icao);
+    const std::vector<RfArcRow>& ffArcsForAirport(const std::string& icao);
+    std::vector<std::pair<double, size_t>> nearestAirports(double anchorLat,
+                                                           double anchorLon);
 
     std::string root_;
     bool airportsLoaded_ = false;
     std::vector<AirportFix> airports_;
-    std::map<std::string, std::vector<RfArcRow>> cache_;  // ICAO -> arcs
+    std::map<std::string, std::vector<RfArcRow>> cache_;  // ICAO -> CIFP arcs
+    std::map<std::string, std::vector<RfArcRow>> ffCache_;  // ICAO -> FF757 arcs
     std::set<std::string> negative_;                     // "ENTRY|EXIT" pairs with no RF arc
 };
 

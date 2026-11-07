@@ -107,6 +107,9 @@ private:
     double lastPoll_ = 0.0;
     double lastBind_ = -1000.0;
     double lastActivePoll_ = 0.0;
+    // Last active index pushed into the snapshot by the geometric sequencing
+    // fallback, so a silent advance does not rebuild every poll.
+    int lastActiveBuilt_ = -1;
     double lastAction_ = 0.0;
     double lastPress_ = -100.0;
     double releaseAt_ = 0.0;

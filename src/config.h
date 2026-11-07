@@ -36,6 +36,25 @@ struct Config {
     // database.  When false, RF legs pass through to the FF757's polygonal
     // approximation like any other complex leg.
     bool lnavRfEnabled = true;
+    // Allow a small FD roll nudge on RF arcs only.  The FF757 often leaves
+    // override_nav_heading at 0, so the nav target alone cannot hold the
+    // published radius; a +/-4 deg roll correction actually bends the path
+    // without touching any other leg.
+    bool lnavRfFdRoll = true;
+    // Force sim/operation/override/override_nav_heading=1 while an RF arc is
+    // tracked (heading-direct guidance).  X-Plane's nav controller then flies
+    // the plugin's nav_steer target, converted from track to heading with the
+    // wind-correction angle and track damping (see lnavTrackDamp*).  The model
+    // clears the flag every frame, so it is re-asserted every frame like the
+    // 787 reference script; FD roll is skipped while it is live so only one
+    // lateral controller commands roll.
+    bool lnavRfNavOverride = true;
+    // Heading-direct RF command shaping (787 reference): damp = -gain *
+    // (actual track - desired track), clamped to +/- max, then converted to a
+    // heading with the wind-correction angle.  Suppresses oscillation and
+    // wind-induced drift while the nav controller flies the command.
+    double lnavTrackDampGain = 0.35;
+    double lnavTrackDampMaxDeg = 10.0;
     double lnavMinSpeedKts = 60.0;
     double lnavMinDistanceNm = 0.05;
     double lnavRollGain = 0.25;

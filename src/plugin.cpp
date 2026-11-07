@@ -165,6 +165,7 @@ struct SimRefs {
     bool fdRollCockpit2Writable = false;
     bool overridePitchWritable = false;
     bool overrideRollWritable = false;
+    bool overrideNavHeadingWritable = false;
     bool ffAvionicsFound = false;
     bool ffDatarefsFound = false;
 };
@@ -265,6 +266,15 @@ float g_lastCockpit2RollOut = 1.0e9f;
 double g_lastCockpit2RollCorrection = 0.0;
 float g_lastLegacyRollOut = 1.0e9f;
 double g_lastLegacyRollCorrection = 0.0;
+
+// The RF arc owns the nav target.  With override_nav_heading set, X-Plane's
+// nav controller flies our nav_steer heading instead of the model's course.
+// The FF757 v2 build resets the flag every frame; re-asserting it (rather than
+// treating that as a failure) matches the 787 reference script, and FD roll is
+// skipped while it is live so only one lateral controller commands roll.
+bool g_ownNavHeadingOverride = false;
+bool g_rfNavOverrideLogged = false;
+int g_navOverrideAtFrameStart = 0;
 
 int g_errorCount = 0;
 std::string g_lastError;
@@ -509,6 +519,8 @@ void BindRefs() {
         g_refs.overridePitch && XPLMCanWriteDataRef(g_refs.overridePitch);
     g_refs.overrideRollWritable =
         g_refs.overrideRoll && XPLMCanWriteDataRef(g_refs.overrideRoll);
+    g_refs.overrideNavHeadingWritable =
+        g_refs.overrideNavHeading && XPLMCanWriteDataRef(g_refs.overrideNavHeading);
 
     g_refs.ffAvionicsFound = g_refs.apMode || g_refs.rollMode || g_refs.pitchMode ||
                              g_refs.vnavPhase || g_refs.airnavDtk;
@@ -986,6 +998,15 @@ void ClearRollOverride() {
     g_lastLegacyRollCorrection = 0.0;
 }
 
+void ClearNavHeadingOverride() {
+    if (g_ownNavHeadingOverride && g_refs.overrideNavHeading &&
+        g_refs.overrideNavHeadingWritable) {
+        XPLMSetDatai(g_refs.overrideNavHeading, 0);
+    }
+    g_ownNavHeadingOverride = false;
+    g_rfNavOverrideLogged = false;
+}
+
 bool WriteFdRoll(double correctionDeg, double dt) {
     if (!g_refs.fdRollLegacy || !g_refs.fdRollLegacyWritable) {
         g_lnav.note = "legacy FD roll dataref is not writable";
@@ -1349,6 +1370,7 @@ void ToggleEnabled() {
     if (!g_config.enabled) {
         ClearPitchOverride();
         ClearRollOverride();
+        ClearNavHeadingOverride();
     }
     SaveConfig();
     UpdateMenuChecks();
@@ -1358,7 +1380,10 @@ void ToggleEnabled() {
 void ToggleLnav() {
     g_config.enableLnav = !g_config.enableLnav;
     g_pub.lnavEnabled = g_config.enableLnav ? 1 : 0;
-    if (!g_config.enableLnav) ClearRollOverride();
+    if (!g_config.enableLnav) {
+        ClearRollOverride();
+        ClearNavHeadingOverride();
+    }
     SaveConfig();
     UpdateMenuChecks();
     Logf("LNAV enhancement %s", g_config.enableLnav ? "enabled" : "disabled");
@@ -1832,7 +1857,7 @@ void UpdateStatusFromResults(const LnavResult& ln, const VnavResult& vn,
     g_pub.pitchMode = g_status.pitchMode;
     g_pub.vnavPhase = g_status.vnavPhase;
     g_pub.apEngaged = g_state.apEngaged ? 1 : 0;
-    g_pub.lnavOverride = g_state.lnavOverride ? 1 : 0;
+    g_pub.lnavOverride = (g_state.lnavOverride || g_ownNavHeadingOverride) ? 1 : 0;
 
     g_pub.xtkNm = static_cast<float>(ln.xtkNm);
     g_pub.distanceNm = static_cast<float>(ln.distanceNm);
@@ -1865,7 +1890,10 @@ void SyncConfigFromPublished() {
         g_pub.lnavEnabled = g_config.enableLnav ? 1 : 0;
         g_pub.vnavEnabled = g_config.enableVnav ? 1 : 0;
         if (!g_config.enabled || !g_config.enableVnav) ClearPitchOverride();
-        if (!g_config.enabled || !g_config.enableLnav) ClearRollOverride();
+        if (!g_config.enabled || !g_config.enableLnav) {
+            ClearRollOverride();
+            ClearNavHeadingOverride();
+        }
         SaveConfig();
         UpdateMenuChecks();
         Logf("published switches changed: enabled=%d lnav=%d vnav=%d",
@@ -1910,6 +1938,7 @@ float FlightLoopCallback(float elapsedSinceLastCall, float, int, void*) {
         if (RdI(g_refs.paused, 0) != 0) {
             ClearPitchOverride();
             ClearRollOverride();
+            ClearNavHeadingOverride();
             g_status.message = "Simulator paused";
             return -1.0f;
         }
@@ -1934,6 +1963,7 @@ float FlightLoopCallback(float elapsedSinceLastCall, float, int, void*) {
             }
             ClearPitchOverride();
             ClearRollOverride();
+            ClearNavHeadingOverride();
             g_guidance.reset();
             g_lastVsFpm = 0.0;
             g_vsAccel = 0.0;
@@ -1954,40 +1984,114 @@ float FlightLoopCallback(float elapsedSinceLastCall, float, int, void*) {
             g_state.fdRollDeg = fdRollBaseline;
         }
         ReadCdiInput();
+        // Sample the flag before this frame's writes so the RF override logic
+        // can tell whether the model let our previous write survive.
+        g_navOverrideAtFrameStart = RdI(g_refs.overrideNavHeading);
 
         g_lnav = g_guidance.computeLnav(g_state, g_routeReader.route(), g_cdi, g_config);
         g_vnav = g_guidance.computeVnav(g_state, g_routeReader.route(), g_config);
 
         bool navWritten = false;
         bool rollWritten = false;
+        const bool rfArcNow = g_lnav.source == "RF ARC";
         if (g_config.enableLnav && g_lnav.active && g_state.apEngaged) {
-            // Write the target-level course even when the FF757 has
-            // override_nav_heading=0.  X-Plane's generic AP ignores it, but the
-            // FF757's own guidance may consume it; it is a target, not a raw
-            // bank command, so it cannot command a constant turn by itself.
+            // Write the nav target every frame.  Without the override X-Plane's
+            // generic AP ignores it; on RF arcs with heading-direct guidance it
+            // is the actual heading command.
+            const bool rfHeadingDirect = rfArcNow && g_config.lnavRfNavOverride;
+            double navTargetMag = normalize360(g_lnav.desiredCourseMagDeg);
             if (g_refs.navSteerWritable) {
-                const double target = normalize360(g_lnav.desiredCourseMagDeg);
-                XPLMSetDataf(g_refs.navSteer, static_cast<float>(target));
+                if (rfHeadingDirect) {
+                    // The nav controller consumes nav_steer_deg_mag as a
+                    // HEADING, while our guidance output is a desired TRACK.
+                    // Convert with the wind-correction angle (hdg - trk) and
+                    // add track-error damping, the same command shape as the
+                    // 787 reference: heading = track + damp + WCA.
+                    const double trackMag =
+                        magneticFromTrue(g_state.trackTrueDeg, g_state.magVarDeg);
+                    const double headingMag = RdF(g_refs.magPsi, NAN);
+                    const double trackErr =
+                        normalize180(trackMag - g_lnav.desiredCourseMagDeg);
+                    const double damp =
+                        clampd(-g_config.lnavTrackDampGain * trackErr,
+                               -g_config.lnavTrackDampMaxDeg,
+                               g_config.lnavTrackDampMaxDeg);
+                    const double wca = Finite(headingMag)
+                                           ? normalize180(headingMag - trackMag)
+                                           : 0.0;
+                    navTargetMag =
+                        normalize360(g_lnav.desiredCourseMagDeg + damp + wca);
+                }
+                XPLMSetDataf(g_refs.navSteer, static_cast<float>(navTargetMag));
                 navWritten = true;
-                if (!g_state.lnavOverride) {
+                if (!g_state.lnavOverride && !rfArcNow) {
                     g_lnav.note = "nav target write (override_nav_heading=0)";
                 }
                 if (g_config.debug && g_pitchWriteCount < 3) {
                     Logf("LNAV write: nav_steer=%.2f (base=%.2f xtk=%+.2f dist=%.2f)",
-                         target, g_lnav.baseCourseMagDeg, g_lnav.xtkNm, g_lnav.distanceNm);
+                         navTargetMag, g_lnav.baseCourseMagDeg, g_lnav.xtkNm,
+                         g_lnav.distanceNm);
                 }
             } else {
                 g_lnav.note = "nav_steer dataref is not writable";
             }
 
+            // RF heading-direct: hold override_nav_heading every frame.  The
+            // model clears it each frame - that is normal (the 787 reference
+            // counts and re-asserts the same way), not a failure - so re-assert
+            // it and keep nav_steer in step.  FD roll is skipped below, leaving
+            // a single lateral controller in command.
+            bool navOverrideLive = false;
+            const bool rfNavOverrideWanted = rfHeadingDirect && navWritten &&
+                                             g_refs.overrideNavHeadingWritable;
+            if (rfNavOverrideWanted) {
+                if (g_navOverrideAtFrameStart == 0) {
+                    XPLMSetDatai(g_refs.overrideNavHeading, 1);
+                    g_ownNavHeadingOverride = true;
+                    if (!g_rfNavOverrideLogged) {
+                        g_rfNavOverrideLogged = true;
+                        Logf("RF arc: heading direct, override_nav_heading=1 (target %.1f)",
+                             navTargetMag);
+                    }
+                } else if (g_ownNavHeadingOverride) {
+                    XPLMSetDatai(g_refs.overrideNavHeading, 1);
+                }
+                navOverrideLive = true;
+            } else {
+                ClearNavHeadingOverride();
+            }
+
+            g_status.lnavOverride = g_state.lnavOverride || navOverrideLive;
+            if (rfArcNow) {
+                if (navOverrideLive) {
+                    g_lnav.note = "RF arc: heading direct (override=1)";
+                }
+            }
+
             // This FF757 build does not set override_nav_heading in LNAV.  Add
             // a small bank correction to the FD roll that the aircraft already
             // produces, so LNAV is still augmented through the servo path.
-            if (g_config.enableLnavFdRoll) {
-                rollWritten = WriteFdRoll(g_lnav.rollCorrectionDeg, dt);
+            // On RF arcs the nav target alone cannot hold the published
+            // radius, so a small (max 4 deg) roll nudge is applied there even
+            // when the global FD-roll path is disabled.  It is limited to this
+            // leg, so no other leg can be pulled into an unwanted turn.
+            // While the nav override is live the controller already flies our
+            // target, so stacking a second roll command would recreate the
+            // same tug-of-war - do not write FD roll in that case.
+            const bool rfRoll = rfArcNow && g_config.lnavRfFdRoll && !navOverrideLive;
+            if (g_config.enableLnavFdRoll || rfRoll) {
+                double corr = g_lnav.rollCorrectionDeg;
+                if (rfRoll && !g_config.enableLnavFdRoll) {
+                    corr = clampd(corr, -4.0, 4.0);
+                }
+                rollWritten = WriteFdRoll(corr, dt);
                 if (rollWritten && g_lnav.note.find("read-only") == std::string::npos) {
-                    g_lnav.note = navWritten ? "nav target + FD roll"
-                                             : "FD roll path (nav_steer override off)";
+                    if (rfRoll) {
+                        g_lnav.note = "RF arc FD roll (max 4 deg)";
+                    } else {
+                        g_lnav.note = navWritten ? "nav target + FD roll"
+                                                 : "FD roll path (nav_steer override off)";
+                    }
                 }
             } else {
                 ClearRollOverride();
@@ -1997,6 +2101,7 @@ float FlightLoopCallback(float elapsedSinceLastCall, float, int, void*) {
             }
         } else {
             ClearRollOverride();
+            ClearNavHeadingOverride();
         }
         const bool lnavWritten = navWritten || rollWritten;
 
@@ -2068,12 +2173,14 @@ float FlightLoopCallback(float elapsedSinceLastCall, float, int, void*) {
         Logf("exception in flight loop: %s", e.what());
         ClearPitchOverride();
         ClearRollOverride();
+        ClearNavHeadingOverride();
     } catch (...) {
         ++g_errorCount;
         g_lastError = "unknown exception";
         Logf("unknown exception in flight loop");
         ClearPitchOverride();
         ClearRollOverride();
+        ClearNavHeadingOverride();
     }
     return -1.0f;
 }
@@ -2099,6 +2206,7 @@ void ResetRuntimeState() {
     g_pitchAuthorityInit = false;
     ClearPitchOverride();
     ClearRollOverride();
+    ClearNavHeadingOverride();
 }
 
 // ---------------------------------------------------------------------------
@@ -2139,14 +2247,15 @@ PLUGIN_API int XPluginStart(char* outName, char* outSig, char* outDesc) {
 
     lvnv::Logf("FF avionics datarefs: %s", lvnv::g_refs.ffDatarefsFound ? "found" : "missing");
     lvnv::Logf("route datarefs: %s", lvnv::g_routeReader.report().c_str());
-    lvnv::Logf("writable: nav_steer=%d fd_pitch_legacy=%d fd_pitch_c2=%d fd_roll_legacy=%d fd_roll_c2=%d override_pitch=%d override_roll=%d",
+    lvnv::Logf("writable: nav_steer=%d fd_pitch_legacy=%d fd_pitch_c2=%d fd_roll_legacy=%d fd_roll_c2=%d override_pitch=%d override_roll=%d override_nav_heading=%d",
                lvnv::g_refs.navSteerWritable ? 1 : 0,
                lvnv::g_refs.fdPitchLegacyWritable ? 1 : 0,
                lvnv::g_refs.fdPitchCockpit2Writable ? 1 : 0,
                lvnv::g_refs.fdRollLegacyWritable ? 1 : 0,
                lvnv::g_refs.fdRollCockpit2Writable ? 1 : 0,
                lvnv::g_refs.overridePitchWritable ? 1 : 0,
-               lvnv::g_refs.overrideRollWritable ? 1 : 0);
+               lvnv::g_refs.overrideRollWritable ? 1 : 0,
+               lvnv::g_refs.overrideNavHeadingWritable ? 1 : 0);
     lvnv::Logf("aircraft detected as FF757/767: %d", lvnv::g_status.aircraftIsFF ? 1 : 0);
 
     return 1;
@@ -2160,6 +2269,7 @@ PLUGIN_API void XPluginStop(void) {
     }
     lvnv::ClearPitchOverride();
     lvnv::ClearRollOverride();
+    lvnv::ClearNavHeadingOverride();
     lvnv::SaveConfig();
     lvnv::DestroyMenuAndCommands();
     lvnv::UnregisterPublished();
@@ -2198,6 +2308,7 @@ PLUGIN_API void XPluginDisable(void) {
     }
     lvnv::ClearPitchOverride();
     lvnv::ClearRollOverride();
+    lvnv::ClearNavHeadingOverride();
     lvnv::SetWindowVisible(false);
     lvnv::Logf("flight loop disabled");
 }

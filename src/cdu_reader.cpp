@@ -620,6 +620,51 @@ void CduRouteReader::finishScan(double elapsed) {
 void CduRouteReader::advanceActiveIfNeeded(double elapsed) {
     if (!cacheValid_ || elapsed - lastActivePoll_ < 0.5) return;
     lastActivePoll_ = elapsed;
+
+    // Geometric sequencing fallback: advance while the active fix is clearly
+    // behind the aircraft (bearing to it opposes the leg course).  This keeps
+    // the snapshot in step with the FMS when Airnav distance/bearing is not
+    // published or the CDU is left on another page; without it an RNP leg can
+    // stay on waypoint 0 and never reach its RF branch.
+    {
+        double lat = 0.0;
+        double lon = 0.0;
+        readAircraftPosition(lat, lon);
+        if (ValidLatLon(lat, lon)) {
+            for (int guard = 0; guard < 10; ++guard) {
+                const int last = static_cast<int>(route_.wpts.size()) - 1;
+                if (activeIndex_ < 0 || activeIndex_ + 1 > last) break;
+                const RouteWaypoint& cur = route_.wpts[static_cast<size_t>(activeIndex_)];
+                const RouteWaypoint& nxt = route_.wpts[static_cast<size_t>(activeIndex_ + 1)];
+                if (!cur.posValid || !nxt.posValid) break;
+                const double dCur = distanceNm(lat, lon, cur.lat, cur.lon);
+                if (!std::isfinite(dCur) || dCur < 0.3) break;
+
+                // Passed test: project the aircraft position onto the outbound
+                // leg direction from the current fix.  A pure "bearing to the
+                // fix opposes the leg course" test over-sequenced short, tightly
+                // turning departures: during the initial climb/turn several
+                // nearby fixes all read as "behind" and the active index ran
+                // past the fix the CDU still showed on page 1.  The along-track
+                // projection only advances when the aircraft is genuinely
+                // beyond the fix along the leg.
+                const double legCrs = bearingTrue(cur.lat, cur.lon, nxt.lat, nxt.lon);
+                const double midLatRad = deg2rad((lat + cur.lat) * 0.5);
+                const double northNm = (lat - cur.lat) * 60.0;
+                const double eastNm = (lon - cur.lon) * 60.0 * std::cos(midLatRad);
+                const double alongNm =
+                    northNm * std::cos(deg2rad(legCrs)) +
+                    eastNm * std::sin(deg2rad(legCrs));
+                if (!std::isfinite(alongNm) || alongNm < 0.3) break;
+                ++activeIndex_;
+            }
+            if (activeIndex_ != lastActiveBuilt_) {
+                lastActiveBuilt_ = activeIndex_;
+                buildSnapshot();
+            }
+        }
+    }
+
     if (!airnavDis_) return;
 
     double distance = 0.0;
@@ -649,25 +694,41 @@ void CduRouteReader::advanceActiveIfNeeded(double elapsed) {
 
 void CduRouteReader::updateActiveFromScreen(const CduPage& page) {
     if (!cacheValid_ || page.page != 1 || page.legs.empty()) return;
+    // A MOD/reference page must never move the active waypoint.
+    if (!page.activeRoute) return;
     const std::string& firstId = page.legs.front().id;
     if (firstId.empty()) return;
-    if (activeIndex_ >= 0 && activeIndex_ < static_cast<int>(cache_.legs.size()) &&
-        cache_.legs[static_cast<size_t>(activeIndex_)].id == firstId) {
-        return;
-    }
 
-    // The LEGS page can either start at the active waypoint (normal Boeing
-    // behaviour) or at the first route waypoint.  Search the whole cache; a
-    // match behind the active index means the page starts at the origin and is
-    // not a loss of synchronisation, so do not force another scan.
+    // Boeing LEGS page 1 line 1 is the waypoint being flown to right now (the
+    // next waypoint), so the displayed page is authoritative in **both**
+    // directions: starting ahead of the cached index means the index fell
+    // behind, starting behind it means the geometric sequencing fallback ran
+    // too far.  Previously a match behind the index was ignored, so an
+    // over-advance could stick until the FMS happened to sequence again.
+    int match = -1;
+    int bestDelta = 1 << 30;
     for (int i = 0; i < static_cast<int>(cache_.legs.size()); ++i) {
         if (cache_.legs[static_cast<size_t>(i)].id != firstId) continue;
-        if (i <= activeIndex_) return;
-        activeIndex_ = i;
-        buildSnapshot();
+        const int delta = std::abs(i - activeIndex_);
+        if (delta < bestDelta) {
+            bestDelta = delta;
+            match = i;
+        }
+    }
+    if (match < 0) {
+        scanRequested_ = true;
         return;
     }
-    scanRequested_ = true;
+    if (match == activeIndex_) return;
+
+    Logf("CDU active from page 1: %d (%s) -> %d (%s)",
+         activeIndex_,
+         (activeIndex_ >= 0 && activeIndex_ < static_cast<int>(cache_.legs.size()))
+             ? cache_.legs[static_cast<size_t>(activeIndex_)].id.c_str()
+             : "-",
+         match, cache_.legs[static_cast<size_t>(match)].id.c_str());
+    activeIndex_ = match;
+    buildSnapshot();
 }
 
 void CduRouteReader::buildSnapshot() {

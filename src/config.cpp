@@ -128,6 +128,10 @@ bool Config::load(const std::string& path) {
         else if (key == "lnav_max_course_error_deg") { if (parseDouble(value, d)) lnavMaxCourseErrorDeg = d; }
         else if (key == "lnav_rollout_lead_deg") { if (parseDouble(value, d)) lnavRolloutLeadDeg = d; }
         else if (key == "lnav_rf_enabled") { if (parseBool(value, b)) lnavRfEnabled = b; }
+        else if (key == "lnav_rf_fd_roll") { if (parseBool(value, b)) lnavRfFdRoll = b; }
+        else if (key == "lnav_rf_nav_override") { if (parseBool(value, b)) lnavRfNavOverride = b; }
+        else if (key == "lnav_track_damp_gain") { if (parseDouble(value, d)) lnavTrackDampGain = d; }
+        else if (key == "lnav_track_damp_max_deg") { if (parseDouble(value, d)) lnavTrackDampMaxDeg = d; }
         else if (key == "lnav_min_speed_kts") { if (parseDouble(value, d)) lnavMinSpeedKts = d; }
         else if (key == "lnav_min_distance_nm") { if (parseDouble(value, d)) lnavMinDistanceNm = d; }
         else if (key == "lnav_roll_gain") { if (parseDouble(value, d)) lnavRollGain = d; }
@@ -207,6 +211,10 @@ bool Config::save(const std::string& path) const {
     out << "lnav_max_course_error_deg=" << lnavMaxCourseErrorDeg << "\n";
     out << "lnav_rollout_lead_deg=" << lnavRolloutLeadDeg << "\n";
     out << "lnav_rf_enabled=" << (lnavRfEnabled ? 1 : 0) << "\n";
+    out << "lnav_rf_fd_roll=" << (lnavRfFdRoll ? 1 : 0) << "\n";
+    out << "lnav_rf_nav_override=" << (lnavRfNavOverride ? 1 : 0) << "\n";
+    out << "lnav_track_damp_gain=" << lnavTrackDampGain << "\n";
+    out << "lnav_track_damp_max_deg=" << lnavTrackDampMaxDeg << "\n";
     out << "lnav_min_speed_kts=" << lnavMinSpeedKts << "\n";
     out << "lnav_min_distance_nm=" << lnavMinDistanceNm << "\n";
     out << "lnav_roll_gain=" << lnavRollGain << "\n";

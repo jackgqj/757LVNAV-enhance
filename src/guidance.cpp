@@ -164,6 +164,13 @@ void Guidance::reset() {
     cdiSign_ = 1;
     cdiDisagreeCount_ = 0;
     fdRollDisagreeCount_ = 0;
+    cdiCourseRejectCount_ = 0;
+    cdiDistRejectCount_ = 0;
+    holdValid_ = false;
+    holdFrames_ = 0;
+    holdCourseMagDeg_ = 0.0;
+    holdXtkNm_ = 0.0;
+    holdDistNm_ = 0.0;
     anpMeanAbsXtk_ = 0.0;
     anpInit_ = false;
     rnpExceedCount_ = 0;
@@ -276,11 +283,73 @@ LnavResult Guidance::computeLnav(const AircraftState& state,
 
     if (useRoute) {
         const RouteLeg* leg = route.leg(route.activeLeg);
+
+        // An RF leg becomes active many miles before its arc entry.  Tracking
+        // the tangent from there commanded a course up to 50-60 deg off the
+        // inbound leg (seen at ZULS: 82 deg vs the FMS course of 33 deg) and
+        // produced a ~7 NM phantom cross-track plus a false NAV UNABLE RNP.
+        // Take over only once the aircraft is actually on the circle, at or
+        // past the entry radial, and only when the arc's entry tangent agrees
+        // with the FMS course.
+        auto rfEngaged = [&](const RouteLeg* l) {
+            if (!l->rfArc || !cfg.lnavRfEnabled || l->rfTurn == 0) return false;
+            if (l->rfRadiusNm < 0.3 || l->rfTotalSweptDeg < 5.0) return false;
+            const RouteWaypoint* exitW = route.waypoint(l->lastWpt);
+            if (!exitW || !exitW->posValid) return false;
+            const double dir = static_cast<double>(l->rfTurn);
+            const double radialNow =
+                bearingTrue(l->rfCenterLat, l->rfCenterLon, state.lat, state.lon);
+            const double radialErr =
+                distanceNm(l->rfCenterLat, l->rfCenterLon, state.lat, state.lon) -
+                l->rfRadiusNm;
+            // Before capture the aircraft may be miles off the circle; once we
+            // are tracking the arc, allow a wider band so a bank-limited arc
+            // does not drop out every frame.
+            const bool alreadyTracking =
+                rfLegIdx_ == route.activeLeg && rfProgressDeg_ > 0.5;
+            if (std::abs(radialErr) > (alreadyTracking ? 3.0 : 1.5)) return false;
+            const double swept =
+                normalize180(dir * (radialNow - l->rfRadialStartDeg));
+            // Purely geometric gate: no FMS/CDI cross-check.  On RNP segments
+            // the FF757's own route computation is unreliable, so the arc is
+            // accepted from the CIFP geometry alone.
+            return swept >= -1.0;
+        };
+
+        // The FF757's own LNAV cannot fly RF legs (it chains straight segments),
+        // so an RF leg must never be handed back.  Before the arc entry the
+        // plugin flies the inbound course to the entry fix itself, and takes
+        // over the circle once the aircraft is actually on it.
+        const bool rfNow = leg && rfEngaged(leg);
+        int rfEntryIdx = -1;
+        int rfLeadStartIdx = -1;
+        bool rfLeadIn = false;
+        if (leg && leg->rfArc && cfg.lnavRfEnabled && !rfNow && leg->rfTurn != 0 &&
+            leg->rfEntryValid) {
+            // The CDU LEGS cache starts at the active waypoint, so an RF leg
+            // may be active with its entry fix absent from the route: the entry
+            // coordinates come from the CIFP row in that case.
+            const int idx = leg->rfEntryWpt;
+            const double dir = static_cast<double>(leg->rfTurn);
+            const double swept = normalize180(
+                dir * (bearingTrue(leg->rfCenterLat, leg->rfCenterLon,
+                                   state.lat, state.lon) -
+                       leg->rfRadialStartDeg));
+            // Lead in only while still short of the entry radial; past it the
+            // entry fix is behind the aircraft and steering there would turn
+            // it around.
+            if (swept < -0.5) {
+                rfLeadIn = true;
+                rfEntryIdx = idx;
+                const RouteWaypoint* prevW = route.waypoint(idx - 1);
+                if (idx >= 0 && prevW && prevW->posValid) rfLeadStartIdx = idx - 1;
+            }
+        }
+
         if (!leg) {
             useRoute = false;
             out.note = "active leg missing";
-        } else if (leg->rfArc && cfg.lnavRfEnabled && leg->rfTurn != 0 &&
-                   leg->rfRadiusNm >= 0.3 && leg->rfTotalSweptDeg >= 5.0) {
+        } else if (rfNow) {
             // RF constant-radius-to-fix arc (geometry resolved from CIFP).
             // The reference path is the circle itself: steer the tangent at
             // the current radial plus a small correction that pulls the
@@ -391,23 +460,40 @@ LnavResult Guidance::computeLnav(const AircraftState& state,
                     reqBank > cfg.lnavMaxBankDeg ? " (exceeds bank limit)" : "");
                 out.note = note;
             }
-        } else if (leg->complex) {
-            // Arcs / holds / procedure turns need the full leg geometry.  Do
-            // not replace the FF757's procedure guidance with a chord or a
-            // direct-to course.
+        } else if (leg->complex && !rfLeadIn) {
+            // Arcs / holds / procedure turns need the full leg geometry.  An
+            // RF leg is handled above (arc, or plugin-owned lead-in), so only
+            // a genuinely uncapturable arc falls through to the FF757 here.
             useRoute = false;
             complexLeg = true;
-            out.note = "active leg is a multi-point leg; passing through";
+            out.note = leg->rfArc
+                           ? "RF arc not captured yet; passing through"
+                           : "active leg is a multi-point leg; passing through";
         } else {
-            int endIdx = leg->lastWpt;
-            int startIdx = leg->firstWpt;
+            // RF lead-in tracks the inbound course to the arc entry fix; a
+            // normal leg uses its own endpoints.
+            int endIdx = rfLeadIn ? rfEntryIdx : leg->lastWpt;
+            int startIdx = rfLeadIn ? (rfLeadStartIdx >= 0 ? rfLeadStartIdx : rfEntryIdx)
+                                    : leg->firstWpt;
 
             // A one-waypoint leg's course is defined by the previous fix.
-            if (leg->firstWpt == leg->lastWpt) {
+            if (leg->firstWpt == leg->lastWpt && !rfLeadIn) {
                 startIdx = findPreviousLegEnd(route, route.activeLeg);
             }
 
-            const RouteWaypoint* end = route.waypoint(endIdx);
+            // An RF lead-in targets the arc entry fix even when that fix is not
+            // in the route snapshot (CDU LEGS starts at the active waypoint).
+            RouteWaypoint entryFallback;
+            const RouteWaypoint* end = nullptr;
+            if (rfLeadIn && rfEntryIdx < 0) {
+                entryFallback.id = leg->rfEntryId;
+                entryFallback.lat = leg->rfEntryLat;
+                entryFallback.lon = leg->rfEntryLon;
+                entryFallback.posValid = true;
+                end = &entryFallback;
+            } else {
+                end = route.waypoint(endIdx);
+            }
             if (!end || !end->posValid) {
                 useRoute = false;
                 out.note = "active waypoint missing";
@@ -421,6 +507,17 @@ LnavResult Guidance::computeLnav(const AircraftState& state,
                 if (start && startIdx != endIdx && start->posValid) {
                     startLat = start->lat;
                     startLon = start->lon;
+                } else if (rfLeadIn) {
+                    // No start fix available: build the inbound line from the
+                    // arc's own entry tangent (radial +/- 90 deg).  This keeps
+                    // the lead-in independent of the FF757 route.
+                    const double dir = static_cast<double>(leg->rfTurn);
+                    const double tangent =
+                        normalize360(leg->rfRadialStartDeg + dir * 90.0);
+                    const double behind = std::max(dist + 10.0, 20.0);
+                    destinationPoint(end->lat, end->lon,
+                                     normalize360(tangent + 180.0), behind,
+                                     startLat, startLon);
                 } else if (cdi.valid && cdi.distanceNm >= 0.1) {
                     // The CDU LEGS cache starts at the active waypoint, so the
                     // inbound fix is missing.  Reconstruct the inbound course
@@ -444,34 +541,55 @@ LnavResult Guidance::computeLnav(const AircraftState& state,
                                           end->lat, end->lon);
                 bool courseFromCdi = false;
 
-                if (cdi.valid) {
+                // The FF757's route computation is unreliable on RNP segments,
+                // so an RF lead-in is driven purely by CIFP geometry: no course
+                // anchoring and no CDI validation.
+                if (cdi.valid && !rfLeadIn) {
                     const double dCourse = normalize180(courseMag - cdi.courseMagDeg);
-                    if (std::abs(dCourse) > 25.0) {
-                        useRoute = false;
-                        out.note = "route course disagrees with CDI";
-                    } else {
-                        double tolerance = std::max(10.0, cdi.distanceNm * 0.5);
-                        if (std::abs(dist - cdi.distanceNm) > tolerance) {
+                    const double absCourse = std::abs(dCourse);
+                    const double tolerance = std::max(10.0, cdi.distanceNm * 0.5);
+                    const bool distAgrees = std::abs(dist - cdi.distanceNm) <= tolerance;
+
+                    if (absCourse > 25.0) {
+                        // Only a sustained disagreement falls back to CDI; a
+                        // single frame (rescan, sequencing, lagging FMS course)
+                        // must not take the route away.
+                        if (++cdiCourseRejectCount_ >= 40) {
                             useRoute = false;
-                            out.note = "route distance disagrees with CDI";
-                        } else if (std::abs(dCourse) > 0.15 && !syntheticInbound) {
-                            // The FMS leg course is the magenta reference; ours
-                            // is derived from resolved coordinates and can sit
-                            // a degree off.  Over a 60 NM leg one degree of
-                            // difference is a phantom ~1 NM cross-track, which
-                            // used to command a 20 deg intercept at 400 kt and
-                            // swing the aircraft.  Re-anchor the course line on
-                            // the FMS course through the fix instead.
-                            courseMag = cdi.courseMagDeg;
-                            courseTrue = trueFromMagnetic(courseMag, state.magVarDeg);
-                            const double behind = std::max(dist + 10.0, 20.0);
-                            destinationPoint(end->lat, end->lon,
-                                             normalize360(courseTrue + 180.0),
-                                             behind, startLat, startLon);
-                            xtk = crossTrackNm(state.lat, state.lon,
-                                               startLat, startLon,
-                                               end->lat, end->lon);
-                            courseFromCdi = true;
+                            out.note = "route course disagrees with CDI (sustained)";
+                        } else {
+                            out.note = "route course differs from CDI; holding route";
+                        }
+                    } else {
+                        cdiCourseRejectCount_ = 0;
+                        if (!distAgrees) {
+                            if (++cdiDistRejectCount_ >= 40) {
+                                useRoute = false;
+                                out.note = "route distance disagrees with CDI (sustained)";
+                            } else {
+                                out.note = "route distance differs from CDI; holding route";
+                            }
+                        } else {
+                            cdiDistRejectCount_ = 0;
+                            // Anchor the course line on the FMS course only for
+                            // small differences.  A large one means the FMS is
+                            // on another leg or procedure, and its value must
+                            // not override our own geometry.
+                            if (absCourse > 0.15 && absCourse <= 8.0 && !syntheticInbound) {
+                                // One degree of course difference over a 60 NM
+                                // leg is a ~1 NM phantom cross-track, which
+                                // used to command a 20 deg intercept at 400 kt.
+                                courseMag = cdi.courseMagDeg;
+                                courseTrue = trueFromMagnetic(courseMag, state.magVarDeg);
+                                const double behind = std::max(dist + 10.0, 20.0);
+                                destinationPoint(end->lat, end->lon,
+                                                 normalize360(courseTrue + 180.0),
+                                                 behind, startLat, startLon);
+                                xtk = crossTrackNm(state.lat, state.lon,
+                                                   startLat, startLon,
+                                                   end->lat, end->lon);
+                                courseFromCdi = true;
+                            }
                         }
                     }
                 }
@@ -559,7 +677,10 @@ LnavResult Guidance::computeLnav(const AircraftState& state,
                     };
                     double interceptDeg = legIntercept(xtk, dist);
 
-                    if (haveNext) {
+                    // No fly-by anticipation during an RF lead-in: the arc is
+                    // tangent to the inbound course, so the turn starts exactly
+                    // at the entry and the arc itself handles it.
+                    if (haveNext && !rfLeadIn) {
                         const double delta = normalize180(nextCourseTrue - courseTrue);
                         if (std::abs(delta) > 3.0 && std::abs(delta) < 120.0) {
                             const double absDelta = std::abs(delta);
@@ -694,10 +815,48 @@ LnavResult Guidance::computeLnav(const AircraftState& state,
                                        ? "route geometry with synthetic inbound course"
                                        : "FF757 route + turn anticipation";
                     }
+                    if (rfLeadIn) {
+                        out.note = "RF arc lead-in to ";
+                        out.note += leg->rfEntryId.empty() ? "entry fix"
+                                                           : leg->rfEntryId;
+                    }
                     if (courseFromCdi) out.note += " (course from FMS)";
                 }
             }
         }
+    }
+
+    if (out.active && out.routeBased) {
+        // Refresh the hold: a route command stays valid for ~1 s (20 frames),
+        // so a CDU rescan or a sequencing gap does not drop LNAV to CDI dots.
+        holdValid_ = true;
+        holdFrames_ = 20;
+        holdCourseMagDeg_ = out.desiredCourseMagDeg;
+        holdXtkNm_ = out.xtkNm;
+        holdDistNm_ = out.distanceNm;
+    }
+
+    if (!useRoute && !complexLeg && holdValid_ && holdFrames_ > 0) {
+        // Route snapshot momentarily unusable: keep steering the last known
+        // route instead of falling back to GPS CDI steering.
+        out.active = true;
+        out.routeBased = true;
+        out.cdiFallback = false;
+        out.xtkNm = holdXtkNm_;
+        out.distanceNm = holdDistNm_;
+        out.baseCourseMagDeg = holdCourseMagDeg_;
+        const double desired =
+            clampCourseError(holdCourseMagDeg_, currentTrackMag, maxError);
+        out.desiredCourseMagDeg = desired;
+        out.correctionDeg = normalize180(desired - holdCourseMagDeg_);
+        out.rollCorrectionDeg = clampd(cfg.lnavRollGain * out.correctionDeg,
+                                       -cfg.lnavMaxRollCorrectionDeg,
+                                       cfg.lnavMaxRollCorrectionDeg);
+        out.source = "ROUTE HOLD";
+        out.note = "route temporarily unavailable; holding last route guidance";
+        --holdFrames_;
+        if (holdFrames_ <= 0) holdValid_ = false;
+        return out;
     }
 
     if (!useRoute && !complexLeg && cdi.valid && cdi.distanceNm >= cfg.lnavMinDistanceNm) {

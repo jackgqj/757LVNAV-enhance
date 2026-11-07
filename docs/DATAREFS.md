@@ -30,7 +30,7 @@ scan the LEGS page, and does not touch SASL.
 | `sim/cockpit/autopilot/altitude` | Selected (MCP) altitude fallback (read) |
 | `sim/cockpit2/autopilot/flight_director_pitch_deg` | **Baseline** FD pitch (read only) |
 | `sim/cockpit2/autopilot/flight_director_roll_deg` | Status / diagnostics |
-| `sim/operation/override/override_nav_heading` | LNAV active gate |
+| `sim/operation/override/override_nav_heading` | LNAV active gate; held at 1 every frame on RF arcs in heading-direct mode (`lnav_rf_nav_override=1`, default), released after the arc | X-Plane's description: "override raw heading flown by nav (for GPS that fly arcs)". The FF757 clears it every frame; the plugin re-asserts it (same pattern as the 787 reference). FD roll is skipped while it is live |
 | `sim/cockpit/radios/gps_course_degtm` | GPS desired track (mag) |
 | `sim/cockpit/radios/gps_dme_dist_m` | GPS distance to active waypoint (nm) |
 | `sim/cockpit/radios/gps_hdef_dot` | GPS CDI deflection (dots) |
@@ -43,7 +43,7 @@ scan the LEGS page, and does not touch SASL.
 
 | Dataref | When | Notes |
 | --- | --- | --- |
-| `sim/cockpit/autopilot/nav_steer_deg_mag` | LNAV, only when `override_nav_heading=1` | This replaces only the target heading |
+| `sim/cockpit/autopilot/nav_steer_deg_mag` | LNAV, every frame; honoured by the nav controller only when `override_nav_heading=1` (forced on RF arcs) | This replaces only the target heading |
 | `sim/cockpit/autopilot/flight_director_roll` | LNAV active | Legacy FD roll target; a small bank correction is added to the avionics baseline |
 | `sim/operation/override/override_flightdir_roll` | LNAV active | Set to 1 while writing, restored to 0 if the plugin set it |
 | `sim/cockpit2/autopilot/flight_director_roll_deg` | LNAV active, only if the probe succeeds | Used as baseline and written only when the value sticks |

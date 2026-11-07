@@ -79,6 +79,38 @@ int main() {
               "RF rows without turn direction or centre fix are dropped");
     }
 
+    // FF757 procedure database rows (Custom Data/STSFF/navdata/Proc).  Field 4
+    // is the direction the FMS itself uses: 1 = ARC LEFT, 2 = ARC RIGHT.
+    {
+        std::vector<std::string> ff = {
+            "SID,EO28R,28R,5",
+            "IF,RW10L,29.301139,90.888000, ,0.0,0.0,0,0,0,0,0,0,0,0",
+            "TF,LS803,29.300861,90.870028,0, ,0.0,0.0,0.0,0.0,0,0,0,0,0,0,0,0",
+            "RF,LS602,29.292056,90.830639,1,LS041,290.7,4.7,0,0,0,0,0,0,0,0",
+            "RF,LS606,29.315278,90.758944,2,LS016,43.4,2.7,0,0,0,0,0,0,0,0",
+            "RF,LS608,29.374861,90.822944,2,LS016,99.4,2.7,0,0,0,0,0,0,0,0",
+            "STAR,OTHER,10L,2",
+            "RF,LS999,29.1,90.1,2,LSX,10.0,5.0,0,0,0,0,0,0,0,0",
+        };
+        std::vector<RfArcRow> arcs = CifpDatabase::ParseFfProcLines(ff);
+        CHECK(arcs.size() == 4, "FF proc: four RF rows parsed across two blocks");
+        if (arcs.size() == 4) {
+            CHECK(arcs[0].entryIdent == "LS803" && arcs[0].exitIdent == "LS602",
+                  "FF proc: entry is the previous row's fix");
+            CHECK(arcs[0].turn == -1, "FF proc: direction 1 is a left arc");
+            CHECK_NEAR(arcs[0].radiusNm, 4.7, 1e-9, "FF proc: radius from field 7");
+            CHECK(arcs[0].centerIdent == "LS041", "FF proc: centre fix");
+            CHECK(arcs[1].entryIdent == "LS602" && arcs[1].exitIdent == "LS606" &&
+                  arcs[1].turn == 1 && arcs[1].centerIdent == "LS016",
+                  "FF proc: direction 2 is a right arc");
+            CHECK(arcs[2].exitIdent == "LS608" && arcs[2].turn == 1 &&
+                  arcs[2].centerIdent == "LS016",
+                  "FF proc: consecutive arcs share the centre fix");
+            CHECK(arcs[3].entryIdent.empty() && arcs[3].exitIdent == "LS999",
+                  "FF proc: block change resets the entry fix");
+        }
+    }
+
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

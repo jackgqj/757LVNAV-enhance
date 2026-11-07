@@ -146,6 +146,80 @@ const std::vector<RfArcRow>& CifpDatabase::arcsForAirport(const std::string& ica
     return res.first->second;
 }
 
+std::vector<RfArcRow> CifpDatabase::ParseFfProcLines(
+    const std::vector<std::string>& lines) {
+    // FF757 procedure rows are comma separated:
+    //   RF,<fix>,<lat>,<lon>,<dir 1=L 2=R>,<centre fix>,<course>,<radius NM>,...
+    // The direction field is the same value the CDU shows as ARC LEFT/RIGHT.
+    std::vector<RfArcRow> arcs;
+    std::string prevIdent;
+    for (const std::string& line : lines) {
+        const std::vector<std::string> p = SplitComma(line);
+        if (p.empty()) { prevIdent.clear(); continue; }
+        const std::string kind = Upper(Trim(p[0]));
+        if (kind == "SID" || kind == "STAR" || kind == "APPCH" || kind == "AIRPORT") {
+            prevIdent.clear();
+            continue;
+        }
+        if (kind == "RF" && p.size() >= 8) {
+            RfArcRow a;
+            a.entryIdent = prevIdent;
+            a.exitIdent = Upper(Trim(p[1]));
+            const int dir = std::atoi(Trim(p[4]).c_str());
+            a.turn = (dir == 1) ? -1 : (dir == 2) ? 1 : 0;
+            a.centerIdent = Upper(Trim(p[5]));
+            a.radiusNm = std::atof(Trim(p[7]).c_str());
+            if (a.turn != 0 && a.radiusNm >= 0.3 && !a.exitIdent.empty() &&
+                !a.centerIdent.empty()) {
+                bool dup = false;
+                for (const RfArcRow& e : arcs) {
+                    if (e.entryIdent == a.entryIdent && e.exitIdent == a.exitIdent) {
+                        dup = true;
+                        break;
+                    }
+                }
+                if (!dup) arcs.push_back(a);
+            }
+        }
+        prevIdent = Upper(Trim(p[1]));
+    }
+    return arcs;
+}
+
+const std::vector<RfArcRow>& CifpDatabase::ffArcsForAirport(const std::string& icao) {
+    auto it = ffCache_.find(icao);
+    if (it != ffCache_.end()) return it->second;
+
+    std::vector<RfArcRow> arcs;
+    std::ifstream file(root_ + "Custom Data/STSFF/navdata/Proc/" + icao + ".txt");
+    if (file.is_open()) {
+        std::vector<std::string> lines;
+        std::string line;
+        while (std::getline(file, line)) lines.push_back(line);
+        arcs = ParseFfProcLines(lines);
+    }
+    auto res = ffCache_.emplace(icao, std::move(arcs));
+    return res.first->second;
+}
+
+std::vector<std::pair<double, size_t>> CifpDatabase::nearestAirports(
+    double anchorLat, double anchorLon) {
+    // Six nearest in a single pass instead of sorting the whole airport list
+    // on every lookup.
+    std::vector<std::pair<double, size_t>> near;
+    near.reserve(6);
+    for (size_t i = 0; i < airports_.size(); ++i) {
+        const double d =
+            distanceNm(anchorLat, anchorLon, airports_[i].lat, airports_[i].lon);
+        if (d > 120.0) continue;
+        if (near.size() == 6 && d >= near.back().first) continue;
+        near.emplace_back(d, i);
+        std::sort(near.begin(), near.end());
+        if (near.size() > 6) near.pop_back();
+    }
+    return near;
+}
+
 bool CifpDatabase::findRfArc(const std::string& entryIdent,
                              const std::string& exitIdent, double anchorLat,
                              double anchorLon, RfArcRow& out) {
@@ -163,25 +237,24 @@ bool CifpDatabase::findRfArc(const std::string& entryIdent,
     // One lookup per fix pair per session.  Without this the same "no RF arc
     // here" question is re-asked for every leg on every route rebuild.
     const std::string pairKey = entry + "|" + exit;
-    auto negative = negative_.find(pairKey);
-    if (negative != negative_.end()) return false;
+    if (negative_.count(pairKey) != 0) return false;
 
     // Nearest airports first; an RF pair belongs to the procedure database of
     // the airport it terminates at, which is not always the closest one.
-    // Select the six nearest in a single pass instead of sorting the whole
-    // airport list on every call.
-    std::vector<std::pair<double, size_t>> near;
-    near.reserve(6);
-    for (size_t i = 0; i < airports_.size(); ++i) {
-        const double d =
-            distanceNm(anchorLat, anchorLon, airports_[i].lat, airports_[i].lon);
-        if (d > 120.0) continue;
-        if (near.size() == 6 && d >= near.back().first) continue;
-        near.emplace_back(d, i);
-        std::sort(near.begin(), near.end());
-        if (near.size() > 6) near.pop_back();
+    // The FF757's own procedure file wins: its direction is exactly what the
+    // FMS draws (CDU ARC LEFT / ARC RIGHT), so the plugin and the magenta line
+    // agree.  CIFP is the fallback.
+    const auto near = nearestAirports(anchorLat, anchorLon);
+    for (const auto& candidate : near) {
+        const std::vector<RfArcRow>& arcs =
+            ffArcsForAirport(airports_[candidate.second].ident);
+        for (const RfArcRow& arc : arcs) {
+            if (arc.entryIdent == entry && arc.exitIdent == exit) {
+                out = arc;
+                return true;
+            }
+        }
     }
-
     for (const auto& candidate : near) {
         const std::vector<RfArcRow>& arcs =
             arcsForAirport(airports_[candidate.second].ident);
@@ -196,6 +269,46 @@ bool CifpDatabase::findRfArc(const std::string& entryIdent,
     return false;
 }
 
+bool CifpDatabase::findRfArcByExit(const std::string& exitIdent,
+                                   double anchorLat, double anchorLon,
+                                   RfArcRow& out) {
+    if (exitIdent.empty()) return false;
+    if (!(anchorLat >= -90.0 && anchorLat <= 90.0 && anchorLon >= -180.0 &&
+          anchorLon <= 180.0)) {
+        return false;
+    }
+    loadAirports();
+    if (airports_.empty()) return false;
+
+    const std::string exit = Upper(exitIdent);
+    const std::string key = "?|" + exit;
+    if (negative_.count(key) != 0) return false;
+
+    const auto near = nearestAirports(anchorLat, anchorLon);
+    for (const auto& candidate : near) {
+        const std::vector<RfArcRow>& arcs =
+            ffArcsForAirport(airports_[candidate.second].ident);
+        for (const RfArcRow& arc : arcs) {
+            if (arc.exitIdent == exit) {
+                out = arc;
+                return true;
+            }
+        }
+    }
+    for (const auto& candidate : near) {
+        const std::vector<RfArcRow>& arcs =
+            arcsForAirport(airports_[candidate.second].ident);
+        for (const RfArcRow& arc : arcs) {
+            if (arc.exitIdent == exit) {
+                out = arc;
+                return true;
+            }
+        }
+    }
+    if (negative_.size() < 4096) negative_.insert(key);
+    return false;
+}
+
 void AnnotateRfArcs(RouteSnapshot& route, CifpDatabase& cifp, NavDatabase& nav) {
     for (size_t li = 0; li < route.legs.size(); ++li) {
         RouteLeg& leg = route.legs[li];
@@ -207,21 +320,59 @@ void AnnotateRfArcs(RouteSnapshot& route, CifpDatabase& cifp, NavDatabase& nav) 
         RfArcRow arc;
         int entryIdx = -1;
         bool found = false;
+        bool haveEntryCandidate = false;
         for (int ci = leg.firstWpt; ci >= leg.firstWpt - 2 && ci >= 0; --ci) {
             const RouteWaypoint* entryW = route.waypoint(ci);
             if (!entryW || !entryW->posValid || entryW->id.empty() ||
                 entryW->id == exitW->id) {
                 continue;
             }
+            haveEntryCandidate = true;
             if (cifp.findRfArc(entryW->id, exitW->id, exitW->lat, exitW->lon, arc)) {
                 entryIdx = ci;
                 found = true;
                 break;
             }
         }
-        if (!found) continue;
 
-        const RouteWaypoint* entryW = route.waypoint(entryIdx);
+        // The CDU LEGS cache starts at the active waypoint, so an RF leg can be
+        // active with its entry fix missing from the snapshot.  Match on the
+        // exit fix alone and recover the entry coordinates from the CIFP row.
+        // This must only run when the snapshot has **no** usable entry fix:
+        // when a valid entry exists but the pair is not an RF leg, the leg is
+        // an ordinary TF leg.  Borrowing an arc from a different procedure that
+        // merely shares the exit fix (ZULS LS428 and LS819 are exits of RF legs
+        // in other SIDs) annotated straight legs as arcs and made the aircraft
+        // fly someone else's circle - the "越飞越偏 / 误识别为RF" reports.
+        double entryLat = 0.0;
+        double entryLon = 0.0;
+        bool haveEntry = false;
+        std::string entryId;
+        if (found) {
+            const RouteWaypoint* entryW = route.waypoint(entryIdx);
+            if (entryW && entryW->posValid) {
+                entryLat = entryW->lat;
+                entryLon = entryW->lon;
+                entryId = entryW->id;
+                haveEntry = true;
+            }
+        } else {
+            if (haveEntryCandidate) continue;
+            if (!cifp.findRfArcByExit(exitW->id, exitW->lat, exitW->lon, arc)) {
+                continue;
+            }
+            std::vector<NavFix> entryFix;
+            if (!nav.resolve(std::vector<std::string>{arc.entryIdent}, exitW->lat,
+                             exitW->lon, entryFix) ||
+                entryFix.empty() || !entryFix[0].valid) {
+                continue;
+            }
+            entryLat = entryFix[0].lat;
+            entryLon = entryFix[0].lon;
+            entryId = arc.entryIdent;
+            haveEntry = true;
+        }
+        if (!haveEntry) continue;
 
         double centerLat = 0.0;
         double centerLon = 0.0;
@@ -236,7 +387,7 @@ void AnnotateRfArcs(RouteSnapshot& route, CifpDatabase& cifp, NavDatabase& nav) 
             const double dExit =
                 distanceNm(fix[0].lat, fix[0].lon, exitW->lat, exitW->lon);
             const double dEntry =
-                distanceNm(fix[0].lat, fix[0].lon, entryW->lat, entryW->lon);
+                distanceNm(fix[0].lat, fix[0].lon, entryLat, entryLon);
             if (dExit > 0.5 * arc.radiusNm && dExit < 1.5 * arc.radiusNm &&
                 dEntry > 0.5 * arc.radiusNm && dEntry < 1.5 * arc.radiusNm) {
                 centerLat = fix[0].lat;
@@ -247,18 +398,20 @@ void AnnotateRfArcs(RouteSnapshot& route, CifpDatabase& cifp, NavDatabase& nav) 
 
         if (!haveCenter) {
             // Tangent continuity: the centre is R to the side of the inbound
-            // course at the entry fix.
-            const RouteWaypoint* prevW = route.waypoint(entryIdx - 1);
+            // course at the entry fix.  Only possible when the fix before the
+            // entry is known.
+            const RouteWaypoint* prevW =
+                route.waypoint(entryIdx >= 0 ? entryIdx - 1 : -1);
             if (!prevW || !prevW->posValid) continue;
             const double inbound =
-                bearingTrue(prevW->lat, prevW->lon, entryW->lat, entryW->lon);
-            destinationPoint(entryW->lat, entryW->lon,
+                bearingTrue(prevW->lat, prevW->lon, entryLat, entryLon);
+            destinationPoint(entryLat, entryLon,
                              normalize360(inbound + arc.turn * 90.0),
                              arc.radiusNm, centerLat, centerLon);
         }
 
         const double radialStart =
-            bearingTrue(centerLat, centerLon, entryW->lat, entryW->lon);
+            bearingTrue(centerLat, centerLon, entryLat, entryLon);
         const double radialEnd =
             bearingTrue(centerLat, centerLon, exitW->lat, exitW->lon);
         double total = normalize180(arc.turn * (radialEnd - radialStart));
@@ -267,7 +420,7 @@ void AnnotateRfArcs(RouteSnapshot& route, CifpDatabase& cifp, NavDatabase& nav) 
 
         // Geometric consistency: the arc cannot be shorter than the chord.
         const double chord =
-            distanceNm(entryW->lat, entryW->lon, exitW->lat, exitW->lon);
+            distanceNm(entryLat, entryLon, exitW->lat, exitW->lon);
         if (arc.radiusNm * deg2rad(total) < chord * 0.98) continue;
 
         leg.rfArc = true;
@@ -279,6 +432,10 @@ void AnnotateRfArcs(RouteSnapshot& route, CifpDatabase& cifp, NavDatabase& nav) 
         leg.rfRadialEndDeg = radialEnd;
         leg.rfTotalSweptDeg = total;
         leg.rfEntryWpt = entryIdx;
+        leg.rfEntryId = entryId;
+        leg.rfEntryLat = entryLat;
+        leg.rfEntryLon = entryLon;
+        leg.rfEntryValid = true;
     }
 }
 

@@ -1,4 +1,4 @@
-# 使用说明（中文 / English）NOTICE: the use advise is outdate,please follow doc/usage
+# 使用说明（中文 / English）
 
 757 LNAV/VNAV Plus — FlightFactor 757/767 的独立 LNAV/VNAV 增强插件。
 本插件不修改 SASL、不改飞机文件、不改 FF 的 avionics 插件。

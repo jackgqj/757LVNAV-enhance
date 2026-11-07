@@ -1,5 +1,200 @@
 # Changelog
 
+## 1.2.17 — 2026-11-07
+
+Fixed straight legs being mistaken for RF arcs (ZULS "越飞越偏 / 误识别为RF").
+
+- The exit-only RF fallback (added for snapshots that start at the active fix)
+  matched any arc in the airport's procedure database whose exit fix happened
+  to equal the leg's end fix.  On ZULS, LS428 and LS819 are RF exits in **other**
+  SIDs, so straight legs such as LS516→LS428 and LS612→LS819 were annotated as
+  arcs.  The aircraft then flew another procedure's circle and drifted away
+  (`src=RF ARC` on a leg that the CDU shows as a plain TF leg).
+- The fallback now runs **only when the snapshot has no usable entry fix**.
+  If a valid entry fix exists but the pair is not an RF leg, the leg is left as
+  a normal straight leg.
+
+## 1.2.15 — 2026-11-07
+
+RF arcs now use heading-direct guidance modelled on the 787 reference script.
+
+- On RF arcs the plugin holds `sim/operation/override/override_nav_heading=1`
+  every frame (the model clearing it each frame is normal; it is re-asserted)
+  and writes `nav_steer_deg_mag` with a **heading**, not a track:
+  `desired track + damp + WCA`, where `WCA = hdg - trk` and
+  `damp = -0.35 x (trk - desired track)` clamped to ±10°.
+- FD roll is not written while this mode is live.  1.2.12 wrote the override
+  **and** FD roll (`override_flightdir_roll`) at the same time, replacing the
+  nav controller's own roll loop with a ±4° nudge; that broken loop, plus the
+  track-as-heading error, produced the abnormal circling.
+- New `lnav_track_damp_gain` (0.35) and `lnav_track_damp_max_deg` (10) tune the
+  damping.  `lnav_rf_nav_override=0` falls back to the ±4° FD roll path.
+- Status note reads `RF arc: heading direct (override=1)`; the status window's
+  `navOverride` now also reflects the plugin-held flag.
+
+## 1.2.14 — 2026-11-07
+
+Stopped the RF nav-override tug-of-war that produced abnormal circling.
+
+- Log evidence from the reported flight: `RF arc: override_nav_heading=1`
+  appeared **once per frame** while the status window still read
+  `navOverride=0`, meaning the FF757 clears the flag every frame.  The plugin
+  re-asserted it at 20 Hz, so X-Plane's nav controller and the model's own nav
+  logic alternated - the aircraft rolled into a continuous turn.
+- `lnav_rf_nav_override` now defaults to **0**.  Forcing the override is opt-in
+  only; the ±4° RF FD-roll path (1.2.11 behaviour) is the default.
+- When it is enabled, the plugin now watches whether its write survives.  If
+  the model resets it three frames in a row, the plugin stops forcing it for
+  that arc, restores the flag to 0 and logs "FD roll only" instead of fighting.
+- While the override is actually live, the FD roll nudge is skipped so only one
+  lateral controller is in command.
+
+## 1.2.13 — 2026-11-07
+
+Active-waypoint recognition follows CDU LEGS page 1 exactly.
+
+- On the FF757 the **first line of LEGS page 1 is the next waypoint** (the one
+  being flown to).  The reader now treats that row as authoritative in both
+  directions, so an over-sequenced index is pulled back immediately instead of
+  sticking until the FMS sequences again.  MOD/reference pages are ignored.
+- The geometric sequencing fallback was over-advancing on short, tightly
+  turning departures: "bearing to the fix opposes the leg course" flagged
+  several nearby fixes as behind during the initial climb, which pushed the
+  active index past LS606 (it reported LS612 while the CDU still showed
+  LS606/2 NM).  It now only advances when the aircraft is genuinely **past the
+  fix along the outbound leg**, measured as an along-track projection, and it
+  still requires > 0.3 NM from the fix.
+
+## 1.2.12 — 2026-11-07
+
+RF arcs now take over the nav controller instead of only nudging roll.
+
+- While an RF arc is tracked the plugin forces
+  `sim/operation/override/override_nav_heading=1`.  Per X-Plane's own
+  description ("override raw heading flown by nav (for GPS that fly arcs)"),
+  the nav controller then flies the plugin's `nav_steer_deg_mag` target rather
+  than the model's course, so the arc no longer depends on the ±4° roll nudge
+  alone.  The flag is only taken when `nav_steer` was actually written, so the
+  controller can never chase a stale target.
+- The override is released the moment the arc ends or LNAV drops out, and is
+  restored to 0 only if the plugin was the one that set it.  Pause, disable,
+  stop, exception handling and menu toggles all release it too.
+- New `lnav_rf_nav_override` (default 1) controls it.  Set 0 to leave the nav
+  controller entirely to the model.
+- Status note reads `RF arc: nav override=1` (or `RF arc: nav override + FD
+  roll (max 4 deg)` when both are active).
+
+## 1.2.11 — 2026-11-07
+
+RF arcs get a small FD roll correction of their own.
+
+- The FF757 leaves `override_nav_heading` at 0, so the nav target alone cannot
+  hold a published RF radius and the model flies its polygonal version.  While
+  the plugin is tracking an RF arc it now adds a roll correction to the FD roll
+  baseline it already reads, limited to **±4°** and applied only on that leg.
+- New `lnav_rf_fd_roll` (default 1) controls it; set 0 to leave roll entirely to
+  the FF757.  The global `lnav_fd_roll` stays off by default, so no other leg is
+  affected.
+- Status note reads `RF arc FD roll (max 4 deg)` when the nudge is active.
+
+## 1.2.10 — 2026-11-07
+
+Fixes RF legs never activating because the CDU snapshot stayed on waypoint 0.
+
+- The snapshot's active index now has a **geometric sequencing fallback**: while
+  the active fix is clearly behind the aircraft (bearing to it opposes the leg
+  course, and it is more than 0.3 NM away), the index advances.  Previously
+  sequencing relied on Airnav distance/bearing or the visible LEGS page, so a
+  CDU left on another page could leave the route pointing at the departure
+  runway while the FMS had already reached LS608 — and an RF leg could never be
+  reached.
+- Applies only to CDU-derived routes and advances monotonically, so it cannot
+  jump backwards or skip an active fix.
+
+## 1.2.9 — 2026-11-07
+
+RF geometry now comes from the FF757's own procedure database first.
+
+- `Custom Data/STSFF/navdata/Proc/<ICAO>.txt` is parsed for RF rows:
+  `RF,<fix>,<lat>,<lon>,<dir>,<centre>,<course>,<radius>`.  The direction field
+  is the value behind the CDU's ARC LEFT (1) / ARC RIGHT (2), so the traced
+  circle now matches the magenta path the FMS draws, including direction.
+- FF757 data is preferred; X-Plane's CIFP remains the fallback for airports or
+  cycles where the model has no procedure file.  Verified at ZULS: LS608 →
+  R = 2.70 NM, right arc, 130.1°, centre LS016 from both sources.
+- Parser unit tests cover the FF row format, block resets and the
+  1 = left / 2 = right mapping.
+
+## 1.2.8 — 2026-11-07
+
+Stops LNAV from dropping to GPS CDI steering over transient events.
+
+- The CDI cross-check now needs a **sustained** disagreement (~2 s / 40
+  frames) before the route is rejected.  A single frame during a CDU rescan,
+  a sequencing step, or a lagging FMS course no longer takes the route away.
+  The note reports `route course differs from CDI; holding route`.
+- FMS course anchoring only applies to differences of 8° or less.  A larger
+  difference means the FMS is on another leg or procedure, and its course no
+  longer overrides our own geometry.
+- New `ROUTE HOLD`: when the route snapshot is momentarily unusable, the last
+  route-based command (course, cross-track, distance) is held for ~1 s before
+  the CDI fallback is allowed, so the aircraft keeps flying our path instead
+  of switching sources several times a minute.
+
+## 1.2.7 — 2026-11-07
+
+Fixes RF arcs that were missed when their entry fix was absent from the
+route snapshot (ZULS DEP28R, LS606 → LS608).
+
+- The CDU LEGS cache starts at the active waypoint, so an RF leg can be
+  active while the fix before it is missing.  `AnnotateRfArcs` now falls back
+  to an **exit-only CIFP match** and recovers the entry coordinates and the
+  centre from the CIFP row.  Verified offline with the real ZULS CIFP:
+  LS608 active → R = 2.70 NM, right turn, 130.1°, centre LS016.
+- `RouteLeg` carries the entry fix coordinates (`rfEntryId`, `rfEntryLat/Lon`,
+  `rfEntryValid`), so guidance no longer needs the entry waypoint in the
+  snapshot.
+- The RF lead-in now targets the CIFP entry point and builds its inbound line
+  from the arc's own entry tangent when no start fix exists, instead of
+  falling back to a synthetic FMS course.  This removes the `ROUTE/SYNTH`
+  path that produced the 4.25 NM phantom cross-track and the false
+  `NAV UNABLE RNP`.
+
+## 1.2.6 — 2026-11-07
+
+Corrects the RF capture gate from 1.2.5: the FF757 cannot fly RF legs (its
+LNAV chains straight segments), so 1.2.5's "hand the leg back until capture"
+was wrong - it would just fly the arc as a polygon.
+
+- The plugin now flies the **lead-in** itself: the inbound course to the arc
+  entry fix, with no fly-by anticipation (the arc is tangent to the inbound
+  course). The status note reads `RF arc lead-in to <fix>`.
+- **The RF segment no longer references the FF757 FMS route at all.** On RNP
+  legs the model's own route computation is unreliable, so neither the course
+  anchoring nor the CDI course/distance validation runs on the lead-in, and
+  the arc is captured from CIFP geometry alone (on the circle, at or past the
+  entry radial). ANP(trk) therefore reflects our own path, not the model's.
+- The arc is picked up at the entry radial when the aircraft is on the circle
+  (1.5 NM band, 3 NM once tracking).
+- Hand-back only remains for the genuine cases: RF disabled, or an arc whose
+  geometry cannot be captured (off the circle past the entry).
+
+## 1.2.5 — 2026-11-07
+
+Fixes RF arcs being hijacked far before their entry, reported at ZULS
+(EO28R RNAV departure).
+
+- An RF leg becomes active many miles before its arc entry.  The plugin used
+  to start tracking the tangent immediately, commanding a course 50-60 deg off
+  the inbound leg (observed: 82 deg vs the FMS course of 33 deg), which looked
+  like a turn deviation and inflated the cross-track to ~7 NM.
+- RF tracking now only engages when the aircraft is actually on the circle
+  (within 1.5 NM, 3 NM once tracking), at or past the entry radial.
+- The arc's entry tangent must agree with the FMS/CDI course within 30 deg,
+  so a CIFP row matched to the wrong procedure can no longer take over.
+- The false `NAV UNABLE RNP` at that moment came from the bogus 6.92 NM
+  cross-track feeding the ANP estimate; with the gate it is no longer sampled.
+
 ## 1.2.4 — 2026-11-06
 
 Fixes the VNAV pitch tug-of-war during descent.
