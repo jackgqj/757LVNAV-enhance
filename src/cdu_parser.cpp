@@ -62,6 +62,25 @@ double ParseNm(const std::string& value) {
     return std::strtod(value.substr(i, end - i).c_str(), nullptr);
 }
 
+// The LEGS page course line starts with a three-digit magnetic course
+// (" 344     16NM").  Returns 0 when the line has no valid course, so the
+// caller falls back to the active desired track.
+int ParseCourseDeg(const std::string& value) {
+    size_t i = 0;
+    while (i < value.size() && IsSpace(value[i])) ++i;
+    int result = 0;
+    int digits = 0;
+    while (i < value.size() && digits < 3 &&
+           std::isdigit(static_cast<unsigned char>(value[i]))) {
+        result = result * 10 + (value[i] - '0');
+        ++i;
+        ++digits;
+    }
+    if (digits != 3) return 0;
+    if (result < 1 || result > 360) return 0;
+    return result;
+}
+
 bool HasDashField(const std::string& value) {
     return value.find("---") != std::string::npos;
 }
@@ -271,6 +290,7 @@ CduPage ParseCduLegsPage(const std::vector<std::string>& rows, int pageHint) {
 
         // The top line carries COURSE and DISTANCE, never the altitude.  The
         // altitude estimate is on the waypoint line itself (".806/FL315").
+        leg.legCourseDeg = ParseCourseDeg(top);
         leg.legDistanceNm = ParseNm(top);
 
         std::string rest = bottom;

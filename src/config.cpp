@@ -67,6 +67,7 @@ void Config::clampValues() {
     lnavXtkBlendNm = std::clamp(lnavXtkBlendNm, 0.5, 10.0);
     lnavTurnLeadFactor = std::clamp(lnavTurnLeadFactor, 0.5, 3.0);
     lnavMaxBankDeg = std::clamp(lnavMaxBankDeg, 10.0, 35.0);
+    lnavTurnBankDeg = std::clamp(lnavTurnBankDeg, 5.0, 35.0);
     lnavMaxCourseErrorDeg = std::clamp(lnavMaxCourseErrorDeg, 20.0, 90.0);
     lnavRolloutLeadDeg = std::clamp(lnavRolloutLeadDeg, 0.0, 10.0);
     lnavMinSpeedKts = std::clamp(lnavMinSpeedKts, 30.0, 150.0);
@@ -125,6 +126,7 @@ bool Config::load(const std::string& path) {
         else if (key == "lnav_xtk_blend_nm") { if (parseDouble(value, d)) lnavXtkBlendNm = d; }
         else if (key == "lnav_turn_lead_factor") { if (parseDouble(value, d)) lnavTurnLeadFactor = d; }
         else if (key == "lnav_max_bank_deg") { if (parseDouble(value, d)) lnavMaxBankDeg = d; }
+        else if (key == "lnav_turn_bank_deg") { if (parseDouble(value, d)) lnavTurnBankDeg = d; }
         else if (key == "lnav_max_course_error_deg") { if (parseDouble(value, d)) lnavMaxCourseErrorDeg = d; }
         else if (key == "lnav_rollout_lead_deg") { if (parseDouble(value, d)) lnavRolloutLeadDeg = d; }
         else if (key == "lnav_rf_enabled") { if (parseBool(value, b)) lnavRfEnabled = b; }
@@ -211,6 +213,7 @@ bool Config::save(const std::string& path) const {
     out << "lnav_xtk_blend_nm=" << lnavXtkBlendNm << "\n";
     out << "lnav_turn_lead_factor=" << lnavTurnLeadFactor << "\n";
     out << "lnav_max_bank_deg=" << lnavMaxBankDeg << "\n";
+    out << "lnav_turn_bank_deg=" << lnavTurnBankDeg << "\n";
     out << "lnav_max_course_error_deg=" << lnavMaxCourseErrorDeg << "\n";
     out << "lnav_rollout_lead_deg=" << lnavRolloutLeadDeg << "\n";
     out << "lnav_rf_enabled=" << (lnavRfEnabled ? 1 : 0) << "\n";

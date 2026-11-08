@@ -1,5 +1,51 @@
 # Changelog
 
+## 1.2.29 — 2026-11-08
+
+Fixes the constant ROUTE-mode cross-track offset on long legs.
+
+- When the route and the FMS agree on a leg's course, the FMS CDI course was
+  treated as the leg's initial bearing and the course line was rebuilt behind
+  the fix.  On long legs the CDI course is the LOCAL great-circle track at the
+  aircraft, so the rebuild rotated the leg by its convergence: LH -> GYA
+  (130 NM) showed `xtk=-1.12` to `-1.36` NM in ROUTE while the CDI stayed at
+  ~0.05 NM, and the phantom offset commanded an unnecessary correction.
+  Legs longer than 30 NM now use the FMS cross-track directly (the course
+  still comes from the FMS); shorter legs keep the line rebuild.
+- Tests: guidance 181 (was 177; 130 NM regression), CDU 42, CIFP 21.
+
+## 1.2.28 — 2026-11-08
+
+Reduces fly-by corner cutting and rollout overshoot.
+
+- Added `lnav_turn_bank_deg` (default 16°, range 5–35).  Fly-by turn
+  anticipation now computes its radius from this bank instead of
+  `lnav_max_bank_deg` (25°), which remains the bank-limit value used by RF
+  arcs.  Live Haikou SID: a 54° right turn at 408 KT cut 0.36 NM inside the
+  new course and overshot the following corner by 0.75 NM; the observed bank
+  was about 15° (radius ~9 NM) while the plugin assumed 25° (5.6 NM) and
+  started the turn ~1.7 NM early.
+- `lnav_rollout_lead_deg` default raised 3° -> 4° so the target freezes on the
+  outbound course slightly earlier.
+- Tests: guidance 177, CDU 42, CIFP 21.
+
+## 1.2.27 — 2026-11-08
+
+Fixes route geometry for legs whose fixes are not in the nav database.
+
+- The CDU LEGS page course line (` 336     14NM`) is now parsed into
+  `CduLeg::legCourseDeg`; previously only the distance was kept.
+- When a waypoint cannot be resolved in the nav database (DME-arc and altitude
+  pseudo-fixes such as `D323P`, `D331W` or `(500)`), the route snapshot now
+  synthesises its position from that leg's own CDU course and distance instead
+  of the single active desired track.  All unresolved fixes used to be placed
+  on one line through the aircraft; each rescan rotated that line, the Airnav
+  sync matched a later leg, and guidance fell back to GPS CDI with
+  `route course disagrees with CDI (sustained)` on the Haikou SID.
+- CDU courses are magnetic; the synthesis converts them to true with the sim
+  magnetic variation.
+- Tests: guidance 177, CDU 42 (was 39; three course checks), CIFP 21.
+
 ## 1.2.26 — 2026-11-08
 
 Fixes the startup crash in the FF757 procedure parser.

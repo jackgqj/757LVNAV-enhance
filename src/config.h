@@ -27,11 +27,17 @@ struct Config {
     // the aircraft neither cuts the corner nor overshoots the next course.
     double lnavTurnLeadFactor = 1.0;
     double lnavMaxBankDeg = 25.0;
+    // Bank assumed when turning a fly-by corner.  The FF757's LNAV usually
+    // rolls to only ~15 deg at cruise speed, while lnavMaxBankDeg (25) is the
+    // structural/bank-limit value also used by RF arcs.  Using 25 for the
+    // fly-by radius started the turn ~1.7 NM early at 400 KT: the aircraft cut
+    // inside the new course and then overshot the following corner.
+    double lnavTurnBankDeg = 16.0;
     double lnavMaxCourseErrorDeg = 60.0;
     // Degrees of arc completed early before the target course is frozen on the
     // outbound leg, so the autopilot's own capture lag rolls out on course
     // instead of overshooting through it.
-    double lnavRolloutLeadDeg = 3.0;
+    double lnavRolloutLeadDeg = 4.0;
     // RF (constant-radius-to-fix) leg tracking from the CIFP procedure
     // database.  When false, RF legs pass through to the FF757's polygonal
     // approximation like any other complex leg.

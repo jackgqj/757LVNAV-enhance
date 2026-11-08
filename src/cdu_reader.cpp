@@ -879,6 +879,7 @@ void CduRouteReader::buildSnapshot() {
     nav_.resolve(idents, anchorLat, anchorLon, fixes);
 
     const double dtk = RdF(airnavDtk_);
+    const double magVar = RdF(magVar_);
     double airnavDistance = 0.0;
     int fromTo = 0;
     readAirnav(airnavDistance, fromTo);
@@ -908,9 +909,15 @@ void CduRouteReader::buildSnapshot() {
         if (have) {
             wpt.lat = fixes[i].lat;
             wpt.lon = fixes[i].lon;
-        } else if (prevValid && dtk > 0.0) {
-            // Navdata lookup failed.  Synthesise the geometry from the active
-            // leg's desired track and the leg distance printed on the CDU.
+        } else if (prevValid && (leg.legCourseDeg > 0 || dtk > 0.0)) {
+            // Navdata lookup failed (DME-arc and altitude pseudo-fixes such as
+            // D323P, D331W or (500) are not in the fix database).  Synthesise
+            // the geometry from the leg's OWN CDU course and the distance
+            // printed above the waypoint.  Using the single active desired
+            // track for every leg put all pseudo-fixes on one line through the
+            // aircraft; each rescan then rotated them, the Airnav sync picked a
+            // later leg, and guidance reported "route course disagrees with CDI"
+            // on the Haikou SID.
             double dist = 0.0;
             if (i == 0) {
                 dist = airnavDistance;
@@ -920,9 +927,14 @@ void CduRouteReader::buildSnapshot() {
                 dist = 10.0;
             }
             if (dist > 0.0) {
+                // CDU courses are magnetic; destinationPoint works in true.
+                const double courseTrue =
+                    leg.legCourseDeg > 0
+                        ? trueFromMagnetic(leg.legCourseDeg, magVar)
+                        : dtk;
                 double outLat = 0.0;
                 double outLon = 0.0;
-                destinationPoint(prevLat, prevLon, dtk, dist, outLat, outLon);
+                destinationPoint(prevLat, prevLon, courseTrue, dist, outLat, outLon);
                 if (ValidLatLon(outLat, outLon)) {
                     wpt.lat = outLat;
                     wpt.lon = outLon;

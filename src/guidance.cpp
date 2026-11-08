@@ -651,14 +651,32 @@ LnavResult Guidance::computeLnav(const AircraftState& state,
                                 // used to command a 20 deg intercept at 400 kt.
                                 courseMag = cdi.courseMagDeg;
                                 courseTrue = trueFromMagnetic(courseMag, state.magVarDeg);
-                                const double behind = std::max(dist + 10.0, 20.0);
-                                destinationPoint(end->lat, end->lon,
-                                                 normalize360(courseTrue + 180.0),
-                                                 behind, startLat, startLon);
-                                xtk = crossTrackNm(state.lat, state.lon,
-                                                   startLat, startLon,
-                                                   end->lat, end->lon);
                                 courseFromCdi = true;
+
+                                // Long legs: the FMS CDI course is the LOCAL
+                                // great-circle track at the aircraft while the
+                                // route course is the leg's initial bearing.
+                                // Rebuilding the line from the local course
+                                // rotates the leg by its convergence (0.4 deg
+                                // over 130 NM is ~1 NM) and produced a persistent
+                                // 1.12-1.36 NM offset in ROUTE mode while the CDI
+                                // showed ~0.05 NM.  Trust the FMS cross-track
+                                // directly on these legs; the route geometry
+                                // still supplies the course and turn anticipation.
+                                const double cdiCorrectionNm =
+                                    cdi.signIsCorrection ? cdi.xtkNm
+                                                         : cdiSign_ * cdi.xtkNm;
+                                if (dist > 30.0 && cdi.xtkValid) {
+                                    xtk = -cdiCorrectionNm;
+                                } else {
+                                    const double behind = std::max(dist + 10.0, 20.0);
+                                    destinationPoint(end->lat, end->lon,
+                                                     normalize360(courseTrue + 180.0),
+                                                     behind, startLat, startLon);
+                                    xtk = crossTrackNm(state.lat, state.lon,
+                                                       startLat, startLon,
+                                                       end->lat, end->lon);
+                                }
                             }
                         }
                     }
@@ -775,7 +793,7 @@ LnavResult Guidance::computeLnav(const AircraftState& state,
                             // arc while still `tangent` miles short, LNAV rolled
                             // out immediately and the corner was cut.
                             const double radius =
-                                turnRadiusNm(state.gsKts, cfg.lnavMaxBankDeg);
+                                turnRadiusNm(state.gsKts, cfg.lnavTurnBankDeg);
                             const double tangent =
                                 clampd(radius * std::tan(deg2rad(absDelta * 0.5)) *
                                            cfg.lnavTurnLeadFactor,

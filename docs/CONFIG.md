@@ -27,8 +27,9 @@ lnav_direct_intercept_deg=45
 lnav_xtk_blend_nm=2.5
 lnav_turn_lead_factor=1.0
 lnav_max_bank_deg=25
+lnav_turn_bank_deg=16
 lnav_max_course_error_deg=60
-lnav_rollout_lead_deg=3.0
+lnav_rollout_lead_deg=4.0
 lnav_rf_enabled=1
 lnav_rf_fd_roll=1
 lnav_rf_nav_override=1
@@ -85,8 +86,9 @@ debug=0
 | `lnav_xtk_blend_nm` | Cross-track at which the small-offset homing hands over to the constant 30° capture | 2.5 nm default. Below it the aircraft flies at the fix (angle = atan(offset/distance), decaying as the offset closes); above it the constant capture applies, blended over ±0.4× this value. Raise it if long legs still show an early swing |
 | `lnav_turn_lead_factor` | How early the turn starts relative to the tangent point | 1.0 = tangent (no corner cut, no rollout overshoot). Increase only if the aircraft still overshoots fixes; decrease below 1.0 makes it turn earlier |
 | `lnav_max_bank_deg` | Bank used to compute turn radius | Match your normal LNAV bank limit (25° default) |
+| `lnav_turn_bank_deg` | Bank assumed for fly-by corner anticipation only | **16° default**. The FF757's LNAV usually rolls to about 15° at cruise speed while `lnav_max_bank_deg` (25°) remains the bank-limit value used by RF arcs. Using 25° for the fly-by radius started the turn ~1.7 NM early at 400 KT, so the aircraft cut inside the new course and then overshot the following corner. Raise toward 20–25 only if your aircraft really banks that steeply in LNAV |
 | `lnav_max_course_error_deg` | Hard course-error clamp | 60° default; prevents extreme commands |
-| `lnav_rollout_lead_deg` | Degrees of arc completed early before the target freezes on the outbound course | 3.0 deg default. If roll-out still overshoots, raise it; if the aircraft straightens visibly early and drifts outside, lower it |
+| `lnav_rollout_lead_deg` | Degrees of arc completed early before the target freezes on the outbound course | **4.0° default**. If roll-out still overshoots, raise it; if the aircraft straightens visibly early and drifts outside, lower it |
 | `lnav_rf_enabled` | RF (constant-radius-to-fix) leg tracking from the CIFP procedure database | 1 default. RF legs (e.g. KSEA RNAV RNP approaches) are flown as true arcs instead of the FF757's polygonal approximation. Set 0 to pass RF legs through like any other complex leg |
 | `lnav_rf_fd_roll` | Small FD roll correction on RF arcs only | **1 default**. The FF757 often keeps `override_nav_heading=0`, so the nav target cannot hold the radius; this adds up to ±4° of roll while an RF arc is tracked. No other leg is affected (global `lnav_fd_roll` stays 0). Set 0 to leave roll fully to the model |
 | `lnav_rf_nav_override` | Heading-direct RF guidance: hold `sim/operation/override/override_nav_heading=1` on RF arcs | **1 default**. The nav controller flies the plugin's `nav_steer_deg_mag`, converted from desired track to heading with the wind-correction angle (`hdg - trk`) plus track damping - the same command shape as the 787 reference script. The FF757 clears the flag every frame, so the plugin re-asserts it each frame (normal, not a failure). FD roll is skipped while this is live, so only one lateral controller commands roll. Set 0 to use the `±4°` FD roll nudge instead (when `lnav_heading_direct=0`) |
