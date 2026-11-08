@@ -56,7 +56,11 @@ bool ValidLatLon(double lat, double lon) {
 
 // Content signature of a displayed LEGS page.  Used to scan once per visible
 // page change and to avoid rescanning the same MOD page that was already
-// scanned and rejected.
+// scanned and rejected.  Only structural content is hashed: the FF757 rewrites
+// the estimated altitude and the printed leg distance continuously as the
+// aircraft flies (".819/FL351", "129NM"), so including them made every poll
+// look like a page edit and rescanned the whole CDU every few seconds - the
+// visible hitch ("卡了一下").  Hard constraints still trigger a rescan.
 std::string PageSignature(const CduPage& page) {
     std::string s;
     s.reserve(192);
@@ -71,11 +75,12 @@ std::string PageSignature(const CduPage& page) {
         s += '|';
         s += leg.id;
         s += ',';
-        s += std::to_string(leg.altFt);
+        s += std::to_string(leg.constraintAltFt);
         s += static_cast<char>('0' + static_cast<int>(leg.altConstraint));
         s += ',';
-        s += std::to_string(static_cast<int>(leg.legDistanceNm * 10.0));
+        s += std::to_string(leg.constraintSpeedKt);
         if (leg.hold) s += 'H';
+        if (leg.discontinuity) s += 'D';
     }
     return s;
 }
@@ -712,6 +717,17 @@ void CduRouteReader::advanceActiveIfNeeded(double elapsed) {
     if (!cacheValid_ || elapsed - lastActivePoll_ < 0.5) return;
     lastActivePoll_ = elapsed;
 
+    // The FF757 Airnav distance/bearing describe its own active leg and are
+    // authoritative.  Running geometry first advanced past ESBAG while Airnav
+    // still showed it active, then the sync pulled the index back: a
+    // `2 (NJ215) -> 1 (ESBAG)` tug-of-war every rescan on the ZSNJ arrival.
+    // Geometry is only a substitute when Airnav is unavailable.
+    double airnavDistNow = 0.0;
+    int airnavFromToNow = 0;
+    readAirnav(airnavDistNow, airnavFromToNow);
+    const bool airnavUsable = airnavDis_ && airnavDistNow > 0.0 &&
+                              airnavDistNow <= 200.0 && airnavFromToNow != 0;
+
     // Geometric sequencing fallback: advance while the active fix is clearly
     // behind the aircraft (bearing to it opposes the leg course).  This keeps
     // the snapshot in step with the FMS when Airnav distance/bearing is not
@@ -721,7 +737,7 @@ void CduRouteReader::advanceActiveIfNeeded(double elapsed) {
         double lat = 0.0;
         double lon = 0.0;
         readAircraftPosition(lat, lon);
-        if (ValidLatLon(lat, lon)) {
+        if (ValidLatLon(lat, lon) && !airnavUsable) {
             const bool pageFresh = screenActiveFresh();
             for (int guard = 0; guard < 10; ++guard) {
                 const int last = static_cast<int>(route_.wpts.size()) - 1;

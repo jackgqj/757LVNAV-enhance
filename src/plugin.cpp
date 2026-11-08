@@ -708,7 +708,12 @@ void ReadAircraftState(double dt) {
     const int stdServos = RdI(g_refs.servosOn);
     const bool haveCustomApMode = g_refs.apMode != nullptr;
     if (haveCustomApMode) {
-        g_state.apEngaged = (g_status.apMode >= g_config.apCmdMode) || stdAutopilot != 0;
+        // The FF757's own AP mode is the source of truth.  X-Plane's
+        // autopilot_on stays 1 with the FD switch on even when the FF757 CMD
+        // is not engaged, which used to keep LNAV active and writing nav_steer
+        // into an AP that was not flying (live: apMode=0, fdRoll=-20 matching
+        // our command, but the aircraft never rolled and drifted 12 NM off).
+        g_state.apEngaged = g_status.apMode >= g_config.apCmdMode;
     } else {
         g_state.apEngaged = stdAutopilot != 0 || (stdServos != 0 && g_refs.autopilotOn == nullptr);
     }

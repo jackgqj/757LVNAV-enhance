@@ -115,6 +115,28 @@ int main() {
         }
     }
 
+    // A one-field row in the middle of a Proc file must reset the chain.
+    // Reading p[1] from such a row was the 1.2.22/1.2.25 crash (0xc0000005
+    // inside Trim): blank lines and a bare "RF" make SplitComma return a
+    // single element, so the unconditional prevIdent assignment ran off the
+    // end of the vector.
+    {
+        std::vector<std::string> mid = {
+            "SID,TEST,10L,2",
+            "TF,AAA,29.1,90.1,0, ,0.0,0.0,0.0,0.0,0,0,0,0,0,0,0,0",
+            "RF",
+            "RF,BBB,29.2,90.2,2,CCC,90.0,3.0,0,0,0,0,0,0,0,0",
+        };
+        std::vector<RfArcRow> arcs = CifpDatabase::ParseFfProcLines(mid);
+        CHECK(arcs.size() == 1, "one-field row does not drop or corrupt the RF chain");
+        if (!arcs.empty()) {
+            CHECK(arcs[0].entryIdent.empty(),
+                  "one-field row clears the entry fix before the next RF");
+            CHECK(arcs[0].exitIdent == "BBB" && arcs[0].centerIdent == "CCC",
+                  "RF after a one-field row keeps its own fields");
+        }
+    }
+
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

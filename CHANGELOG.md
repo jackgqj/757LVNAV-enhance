@@ -1,5 +1,56 @@
 # Changelog
 
+## 1.2.33 — 2026-11-08
+
+Stops the VNAV dive after selecting a low MCP altitude.
+
+- The MCP clamp took a descent target above the aircraft and capped it with
+  `min(target, MCP)`.  Live ZSNJ: at ~8300 ft descending, with ESBAG 8625 ft
+  ahead and 3000 ft selected, the effective target became 3000 ft and the
+  plugin commanded `reqVs=-1838` fpm - a dive straight through the 8625 ft
+  crossing altitude.  The MCP now caps a climb only when the MCP is also above
+  the current altitude; when the MCP is below the aircraft, the plugin holds
+  the current altitude until the profile drops below.  Constraints below the
+  aircraft (NJ215 5910, NJ210 3940) are still targeted normally before 3000.
+- Tests: guidance 185 (was 181; four MCP-below checks), CDU 42, CIFP 21.
+
+## 1.2.32 — 2026-11-08
+
+Stops the periodic CDU rescan hitch.
+
+- `PageSignature` hashed the FF757's continuously changing estimated altitude
+  and printed leg distance, so every poll looked like a page edit: the scanner
+  re-paged the CDU and rebuilt the route every few seconds (live 1.2.31 log:
+  scans every ~1–3 s) and the sim visibly hitched.  The signature now hashes
+  structural content only (idents, hard altitude/speed constraints, holds,
+  discontinuities, page and route name); estimated values no longer trigger a
+  scan, hard constraints still do.
+- Tests unchanged: guidance 181, CDU 42, CIFP 21.
+
+## 1.2.31 — 2026-11-08
+
+Releases LNAV when the FF757 autopilot CMD is not actually engaged.
+
+- The engagement check ORed X-Plane's `autopilot_on` with the FF757 AP mode.
+  `autopilot_on` stays 1 with the FD switch on, so with `apMode=0` (CMD not
+  engaged) the plugin kept LNAV active.  Live ZSNJ arrival: `fdRoll=-20` matched
+  our nav_steer command, but the aircraft never rolled and drifted 12 NM off
+  course with the CDI pegged.  When the FF757 AP mode is available it is now the
+  sole source of truth; LNAV releases and the nav override is cleared.
+- Tests unchanged: guidance 181, CDU 42, CIFP 21.
+
+## 1.2.30 — 2026-11-08
+
+Stops the active-waypoint tug-of-war between Airnav and geometric sequencing.
+
+- `advanceActiveIfNeeded` ran the geometric fallback before reading Airnav.
+  On the ZSNJ arrival it advanced past ESBAG while the FF757 still reported
+  ESBAG as active (12.7 NM), then `syncActiveFromAirnav` pulled the index back:
+  `CDU active sync: 2 (NJ215) -> 1 (ESBAG)` every ~3 s with the route rebuilding
+  each time.  Geometry now runs only when Airnav distance/fromTo is
+  unavailable; the FMS's own active leg wins while it is published.
+- Tests unchanged: guidance 181, CDU 42, CIFP 21.
+
 ## 1.2.29 — 2026-11-08
 
 Fixes the constant ROUTE-mode cross-track offset on long legs.

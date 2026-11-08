@@ -77,6 +77,9 @@ void TestLegsPage() {
               "leg 1 distance 6 NM");
         Check(page.legs[2].legDistanceNm > 32.9 && page.legs[2].legDistanceNm < 33.1,
               "leg 2 distance 33 NM");
+        Check(page.legs[0].legCourseDeg == 336, "leg 0 course 336");
+        Check(page.legs[1].legCourseDeg == 10, "leg 1 course 010");
+        Check(page.legs[2].legCourseDeg == 342, "leg 2 course 342");
         Check(page.legs[0].constraintAltFt == 0, "leg 0 has no hard constraint");
     }
 }

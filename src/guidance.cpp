@@ -1116,7 +1116,15 @@ VnavResult Guidance::computeVnav(const AircraftState& state,
         bool mcpLimited = false;
         if (selectedAlt > 0.0 && cfg.vnavRespectSelectedAlt) {
             if (profileAlt > state.altFt) {
-                profileAlt = std::min(profileAlt, selectedAlt);
+                // Target above us.  The MCP caps a climb only when the MCP is
+                // also above us.  With 3000 selected while descending through
+                // 8300, min(8625,3000) turned the 8625 crossing estimate into
+                // a -1800 fpm dive (live ZSNJ: "3000 ft (MCP limited)",
+                // reqVs=-1838).  When the MCP is below us, hold the current
+                // altitude until the profile drops below.
+                profileAlt = (selectedAlt > state.altFt)
+                                 ? std::min(profileAlt, selectedAlt)
+                                 : state.altFt;
             } else {
                 profileAlt = std::max(profileAlt, selectedAlt);
             }

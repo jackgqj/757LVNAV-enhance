@@ -168,7 +168,7 @@ int main() {
     // the corner.
     {
         RouteSnapshot r = MakeRoute();
-        const double radius = turnRadiusNm(400.0, 25.0);
+        const double radius = turnRadiusNm(400.0, cfg.lnavTurnBankDeg);
         const double tangent = radius * std::tan(deg2rad(45.0));   // 090 -> 000
         const double tangentDeg = tangent / 60.04;                 // at the equator
         const double tangentLon = 1.0 - tangentDeg;
@@ -275,7 +275,9 @@ int main() {
     }
 
     // CDI sign calibration against the FF757's FD roll.  Negative dot with a
-    // right bank must eventually flip to a right correction.
+    // right bank must eventually flip to a right correction.  The check needs
+    // the track aligned with the CDI course and ~2 s of continuous
+    // disagreement, so a recovery turn cannot flip it.
     {
         Guidance gCdiSign;
         RouteSnapshot empty;
@@ -287,12 +289,80 @@ int main() {
         cdi.distanceNm = 10.0;
         cdi.xtkNm = -0.5;
         LnavResult ln;
-        for (int i = 0; i < 12; ++i) {
+        for (int i = 0; i < 140; ++i) {
             ln = gCdiSign.computeLnav(s, empty, cdi, cfg);
         }
         CHECK(gCdiSign.cdiSign() == -1, "FD roll calibrates CDI sign");
         CHECK(ln.desiredCourseMagDeg > 90.0, "calibrated CDI dot turns right");
     }
+
+    // Forced GPS CDI source: the sign is frozen, so a disagreeing FD roll must
+    // not flip it (live 1.2.23 regression: xtk +0.97 -> -0.89, corr
+    // -3.46 -> +3.41 while the aircraft stayed right of course).
+    {
+        Guidance gForced;
+        RouteSnapshot empty;
+        AircraftState s = MakeState(0.0, 0.0, 90.0);
+        s.fdRollDeg = 15.0;
+        CdiInput cdi;
+        cdi.valid = true;
+        cdi.courseMagDeg = 90.0;
+        cdi.distanceNm = 10.0;
+        cdi.xtkNm = -0.5;
+        Config c = cfg;
+        c.lnavForceCdi = true;
+        LnavResult ln;
+        for (int i = 0; i < 200; ++i) {
+            ln = gForced.computeLnav(s, empty, cdi, c);
+        }
+        CHECK(gForced.cdiSign() == 1, "forced CDI keeps the calibrated sign");
+        CHECK(ln.desiredCourseMagDeg < 90.0, "forced CDI dot still turns left");
+    }
+
+    // Once a trusted route cross-track confirms the dot sign, the FD-roll
+    // bootstrap must stay out of the way even when the route later drops out.
+    {
+        Guidance gVerified;
+        RouteSnapshot r = MakeRoute();
+        AircraftState left = MakeState(0.1, 0.5, 90.0);   // left of course
+        CdiInput cdi;
+        cdi.valid = true;
+        cdi.courseMagDeg = 90.0;
+        cdi.distanceNm = 10.0;
+        cdi.xtkNm = 0.5;   // left of course -> turn right
+        gVerified.computeLnav(left, r, cdi, cfg);
+        CHECK(gVerified.cdiSign() == 1, "route agreement confirms the sign");
+
+        RouteSnapshot empty;
+        AircraftState s = MakeState(0.0, 0.0, 90.0);
+        s.fdRollDeg = 15.0;
+        for (int i = 0; i < 200; ++i) {
+            gVerified.computeLnav(s, empty, cdi, cfg);
+        }
+        CHECK(gVerified.cdiSign() == 1, "verified sign is not flipped by FD roll");
+    }
+
+    // Manual GPS CDI source: the route is valid but the switch forces the
+    // CDI path, matching the automatic fallback with a clear note.
+    {
+        RouteSnapshot r = MakeRoute();
+        AircraftState s = MakeState(0.0, 0.5, 90.0);
+        CdiInput cdi;
+        cdi.valid = true;
+        cdi.courseMagDeg = 90.0;
+        cdi.distanceNm = 10.0;
+        cdi.xtkNm = 0.5;
+        Config c = cfg;
+        c.lnavForceCdi = true;
+        Guidance gCdi;
+        LnavResult ln = gCdi.computeLnav(s, r, cdi, c);
+        CHECK(ln.active && ln.source == "GPS CDI",
+              "forced GPS CDI source is used");
+        CHECK(!ln.routeBased, "forced CDI does not use route geometry");
+        CHECK(ln.note.find("forced") != std::string::npos,
+              "forced CDI note is explicit");
+    }
+
 
     // VNAV path: 2000 ft to lose over 6 nm at 400 kt = 2222 fpm (inside TOD).
     // The aircraft must already be descending; the plugin only assists, it
@@ -644,6 +714,25 @@ int main() {
         CHECK(vn.note.find("MCP") != std::string::npos, "MCP hold note");
     }
 
+    // MCP below the current altitude must not turn an above-us crossing
+    // estimate into a dive: selecting 3000 at 8300 with a 8625 ft fix ahead
+    // used to command -1800 fpm (live ZSNJ "3000 ft (MCP limited)").  Hold.
+    {
+        Guidance gMcpLow;
+        RouteSnapshot r = MakeRoute();
+        r.wpts[1].altFt = 8625;
+        r.wpts[1].altValid = true;
+        AircraftState s = MakeState(0.0, 0.9, 90.0);   // ~6 nm to BBB
+        s.altFt = 8300.0;
+        s.selectedAltFt = 3000.0;
+        s.vsFpm = 0.0;
+        VnavResult vn = gMcpLow.computeVnav(s, r, cfg);
+        CHECK(vn.active, "MCP below and target above: mode active");
+        CHECK(vn.passThrough, "MCP below and target above: hold, no dive");
+        CHECK_NEAR(vn.requiredVsFpm, 0.0, 1.0, "no dive commanded");
+        CHECK_NEAR(vn.targetAltFt, 8300.0, 1.0, "holds the current altitude");
+    }
+
     // Boeing course capture (777): |xtk| beyond the blend distance commands a
     // constant 30 deg intercept; small offsets home direct to the fix, so the
     // angle is atan(xtk / distance-to-fix) and decays as the offset closes.
@@ -691,7 +780,7 @@ int main() {
         RouteSnapshot r = MakeRoute();
         CdiInput cdi;
         AircraftState s = MakeState(0.0083, 0.983, 90.0);  // ~1 nm to BBB
-        s.gsKts = 160.0;                                   // tangent < 1 nm, no arc
+        s.gsKts = 130.0;                                   // tangent < 1 nm, no arc
         LnavResult ln = g6.computeLnav(s, r, cdi, cfg);
         CHECK(ln.active, "near-fix intercept active");
         const double err = ln.desiredCourseMagDeg - 90.0;
@@ -708,15 +797,18 @@ int main() {
         RouteSnapshot r = MakeRoute();          // left turn 090 -> 000 at BBB
         CdiInput cdi;
 
-        // ~1 deg before the outbound tangent point T2 (inside the 3 deg lead).
-        AircraftState s = MakeState(0.0804, 0.9999, 355.0);
+        // Points on the tangent arc for the configured turn bank (16 deg) and
+        // the 4 deg rollout lead: T2 is 8.13 nm north of BBB, arc start radial
+        // 180, end radial 090.
+        // ~2 deg before the outbound tangent point T2 (inside the 4 deg lead).
+        AircraftState s = MakeState(0.130668, 0.999913, 355.0);
         LnavResult ln = g7.computeLnav(s, r, cdi, c7);
         CHECK(ln.active, "rollout-lead state active");
         CHECK(std::abs(normalize180(ln.desiredCourseMagDeg)) < 0.5,
               "target frozen on the outbound course inside the lead window");
         CHECK(ln.turnProgress >= 0.999, "progress reads complete while frozen");
 
-        AircraftState s2 = MakeState(0.0688, 0.9988, 15.0);   // ~80 deg turned
+        AircraftState s2 = MakeState(0.111874, 0.997943, 15.0);   // ~80 deg turned
         ln = g7.computeLnav(s2, r, cdi, c7);
         CHECK(ln.active, "mid-arc state active");
         CHECK(std::abs(normalize180(ln.desiredCourseMagDeg) - 10.0) < 2.5,
@@ -1037,6 +1129,20 @@ int main() {
         LnavResult ln2 = gArc.computeLnav(onCircle, r, cdi, cfg);
         CHECK(ln2.active && ln2.source == "RF ARC",
               "arc captures at the entry even without the entry waypoint");
+
+        // Exit-only CIFP match borrowed from another airport: the arc tangent
+        // disagrees with the FMS course, so it must not take over.  Live 1.2.23
+        // case: LS987 tangent 145.7 vs FMS 091.9 produced a 12.8 NM phantom xtk.
+        Guidance gReject;
+        CdiInput fms;
+        fms.valid = true;
+        fms.courseMagDeg = 108.2;   // 54 deg off the 162.2 entry tangent
+        fms.distanceNm = 8.0;
+        fms.xtkNm = 0.0;
+        LnavResult ln3 = gReject.computeLnav(s, r, fms, cfg);
+        CHECK(!ln3.active, "disagreeing FMS course rejects the borrowed RF arc");
+        CHECK(ln3.note.find("RF arc lead-in") == std::string::npos,
+              "rejected RF arc is not flown as a lead-in");
     }
 
     // --- VNAV: speed-limit (DECEL) handling ---
@@ -1173,15 +1279,62 @@ int main() {
         cdi.courseMagDeg = normalize360(legCrs - 1.2);
         cdi.distanceNm = 60.3;
         cdi.xtkNm = 0.03;
+        cdi.xtkValid = true;
 
         LnavResult ln = g.computeLnav(s, r, cdi, cfg);
         CHECK(ln.active && ln.source == "ROUTE", "long leg route LNAV active");
         CHECK(std::abs(ln.xtkNm) < 0.3,
-              "FMS course anchors the line: phantom cross-track removed");
+              "long leg uses the FMS cross-track directly");
         CHECK(std::abs(ln.correctionDeg) < 5.0,
               "no phantom intercept: correction stays under 5 deg");
         CHECK(ln.note.find("course from FMS") != std::string::npos,
-              "note reports the FMS course re-anchor");
+              "note reports the FMS course source");
+    }
+
+    // 130 NM leg: the FMS CDI course is the local great-circle track at the
+    // aircraft while the route course is the leg's initial bearing.  Rebuilding
+    // the line from the local course rotated the leg by its convergence and
+    // produced a persistent -1.36 NM offset in ROUTE mode while the CDI stayed
+    // at ~0.05 NM (live LH -> GYA).  The FMS cross-track must be used directly.
+    {
+        Guidance g;
+        RouteSnapshot r;
+        r.valid = true;
+        r.sourceRoute = true;
+        r.wptCount = 2;
+        r.legCount = 1;
+        r.activeWpt = 1;
+        r.activeLeg = 0;
+        r.nextLeg = -1;
+        r.wpts.resize(2);
+        r.wpts[0].lat = 21.135000; r.wpts[0].lon = 110.333333; r.wpts[0].id = "LH";
+        r.wpts[1].lat = 23.070000; r.wpts[1].lon = 112.486667; r.wpts[1].id = "GYA";
+        r.wpts[0].posValid = true; r.wpts[1].posValid = true;
+        r.legs.resize(1);
+        r.legs[0] = RouteLeg{0, 0, 1, false};
+
+        const double legCrs = bearingTrue(r.wpts[0].lat, r.wpts[0].lon,
+                                          r.wpts[1].lat, r.wpts[1].lon);
+        double lat = 0.0, lon = 0.0;
+        destinationPoint(r.wpts[0].lat, r.wpts[0].lon, legCrs, 0.5, lat, lon);
+        AircraftState s = MakeState(lat, lon, legCrs);
+        s.magVarDeg = 0.0;
+
+        CdiInput cdi;
+        cdi.valid = true;
+        cdi.courseMagDeg = normalize360(legCrs - 0.5);   // local vs initial
+        cdi.distanceNm = 128.9;
+        cdi.xtkNm = 0.05;
+        cdi.xtkValid = true;
+
+        LnavResult ln = g.computeLnav(s, r, cdi, cfg);
+        CHECK(ln.active && ln.source == "ROUTE", "130 NM leg route active");
+        CHECK(std::abs(ln.xtkNm) < 0.1,
+              "130 NM leg uses the FMS cross-track, not a rebuilt line");
+        CHECK(std::abs(ln.correctionDeg) < 1.0,
+              "130 NM leg phantom offset does not command a turn");
+        CHECK(ln.note.find("course from FMS") != std::string::npos,
+              "130 NM leg reports the FMS course source");
     }
 
     // Without a CDI course the geometry still must not swing: a 1.26 NM
