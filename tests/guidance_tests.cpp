@@ -309,7 +309,7 @@ int main() {
         CHECK(vn.pathBased, "VNAV path based");
         CHECK(!vn.passThrough, "established descent writes a correction");
         CHECK_NEAR(vn.requiredVsFpm, -2222.2, 20.0, "required VS");
-        CHECK_NEAR(vn.correctionDeg, -0.578, 0.05, "VNAV correction from the VS error");
+        CHECK_NEAR(vn.correctionDeg, -0.867, 0.05, "VNAV correction from the VS error");
     }
 
     // Implausible low altitude at high altitude must not command a dive.
@@ -473,6 +473,27 @@ int main() {
         s.vsFpm = -1850.0;  // 150 fpm short
         VnavResult d = fresh.computeVnav(s, r, cfg, 1.0);
         CHECK(d.passThrough && !d.pathBased, "150 fpm does not engage");
+    }
+
+    // A target thousands of miles ahead comes from a mis-resolved waypoint.
+    // Live report: FI07 at 2241.8 NM produced reqVS=-43 fpm.
+    {
+        RouteSnapshot r = MakeCduRoute();
+        r.wpts[0].altValid = false;
+        r.wpts[1].lat = 0.0;
+        r.wpts[1].lon = 12.0;   // ~720 NM from AAA
+        r.wpts[1].altFt = 11000;
+        r.wpts[1].altValid = true;
+        r.wpts[2].altValid = false;
+        AircraftState s = MakeState(0.0, -0.0833, 90.0);
+        s.altFt = 19200.0;
+        s.gsKts = 356.0;
+        s.vsFpm = -1783.0;
+        VnavResult vn = guidance.computeVnav(s, r, cfg);
+        CHECK(!vn.pathBased, "far target is rejected, no bogus reqVS");
+        CHECK(vn.passThrough, "far target falls back to pass-through");
+        CHECK(vn.note.find("no usable altitude target") != std::string::npos,
+              "far target is reported as unusable");
     }
 
     // FAR 250/10000 must not arm at cruise for a low-altitude waypoint still

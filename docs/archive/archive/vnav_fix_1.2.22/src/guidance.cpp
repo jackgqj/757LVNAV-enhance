@@ -49,6 +49,11 @@ VnavTarget FindVnavTarget(const RouteSnapshot& route, const AircraftState& state
     VnavTarget target;
     if (!route.valid || route.activeWpt < 0) return target;
 
+    // A "constraint" thousands of miles ahead comes from a mis-resolved
+    // waypoint; using it produced reqVS=-43 fpm against a 2241 NM target
+    // (live FI07 case).  No plausible VNAV target is this far ahead.
+    constexpr double kMaxPlausibleTargetNm = 500.0;
+
     const RouteWaypoint* active = route.waypoint(route.activeWpt);
     if (!active) return target;
 
@@ -71,6 +76,7 @@ VnavTarget FindVnavTarget(const RouteSnapshot& route, const AircraftState& state
             }
             cum += distanceNm(prev->lat, prev->lon, w->lat, w->lon);
         }
+        if (cum > kMaxPlausibleTargetNm) break;
         if (!w->altValid) continue;
         if (std::abs(static_cast<double>(w->altFt) - state.altFt) < 100.0) continue;
         if (cum < minDistance) continue;
@@ -144,6 +150,7 @@ SpeedTarget FindSpeedTarget(const RouteSnapshot& route, const AircraftState& sta
     // the aircraft has not yet passed through.  Skip any waypoint that is
     // currently behind us (within ~0.3 NM of the active position).
     const double leadFactor = cfg.vnavSpeedDecelFactorNmPer10Kt;
+    constexpr double kMaxSpeedLookaheadNm = 500.0;
 
     for (int i = route.activeWpt; i < route.wptCount; ++i) {
         const RouteWaypoint* w = route.waypoint(i);
@@ -154,6 +161,7 @@ SpeedTarget FindSpeedTarget(const RouteSnapshot& route, const AircraftState& sta
                 !std::isfinite(w->lat) || !std::isfinite(w->lon)) break;
             cum += distanceNm(prev->lat, prev->lon, w->lat, w->lon);
         }
+        if (cum > kMaxSpeedLookaheadNm) break;
 
         int limit = 0;
         bool autoFlag = false;

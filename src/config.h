@@ -87,11 +87,14 @@ struct Config {
     double rnpNm = 0.0;
 
     // VNAV
-    double vnavVsGain = 0.80;
+    // 1.2 deg of FD pitch per 1000 fpm of VS error is about 85% of the
+    // physical inverse model at 400 KT (1 deg ~ 707 fpm), so the old 0.8
+    // gain felt slow: a 945 fpm error commanded only 0.75 deg (~450 fpm).
+    double vnavVsGain = 1.20;
     double vnavAccelGain = 0.0015;
     double vnavMaxCorrectionDeg = 2.5;
     double vnavRateLimitDegPerSec = 3.0;
-    double vnavSmoothingTauSec = 0.12;
+    double vnavSmoothingTauSec = 0.10;
     double vnavMaxVsFpm = 3000.0;
     double vnavMinDistanceNm = 0.30;
     double vnavMaxAltDeltaFt = 50000.0;

@@ -160,7 +160,7 @@ if (to10k <= autoLead + 1.0) { limit = 250; autoFlag = true; }
 
 | 测试 | 检查数 | 结果 |
 | --- | --- | --- |
-| `guidance_tests` | 165 | 0 failures |
+| `guidance_tests` | 168 | 0 failures |
 | `cdu_tests` | 39 | 0 failures |
 | `cifp_tests` | 18 | 0 failures |
 
@@ -213,7 +213,7 @@ if (p.size() < 2) { prevIdent.clear(); continue; }
 
 验证：用修复后的解析器直接读取真实
 `Custom Data/STSFF/navdata/Proc/ZSPD.txt` 与 `ZSNJ.txt`，正常完成
-（3510/827 行，0 条 RF 弧，无崩溃）。三套测试为 165 / 39 / 18。
+（3510/827 行，0 条 RF 弧，无崩溃）。三套测试为 168 / 39 / 18。
 
 ## 附：VNAV 俯仰权限与“高于剖面 1630 ft”
 
@@ -291,13 +291,50 @@ override，不再与机模争抢。
   其中一条高度 66000 ft），目标高度跳变会让插件要求爬升。属于 CDU
   航路解析/导航数据匹配问题，需单独修复。
 
+### 4e. VNAV 响应偏慢
+
+实测 `reqVS=-802`、`vs=-1747`（误差 945 fpm）时修正只有 `+0.75°`。
+在 343 KT 下 1° 俯仰约对应 600 fpm，所以 0.75° 只能抵消约 450 fpm，
+不到误差的一半，表现为“响应慢、压不住”。
+
+物理反推：`deg ≈ vsError / (1.767 × GS)`。400 KT 时约 1.41°/1000 fpm，
+343 KT 时约 1.65°/1000 fpm。旧增益 0.8°/1000 fpm 明显偏软。
+
+调整默认值：
+
+- `vnav_vs_gain`：0.8 → **1.2**（约为物理反推的 85% @ 400 KT）
+- `vnav_smoothing_tau_s`：0.12 → **0.10**
+
+同时更新用户配置文件 `Output/preferences/757LVNAVPlus.cfg` 中的这两项，
+否则已保存的旧值会覆盖默认值。`vnav_vs_gain` 的可调范围仍是 0–2，
+嫌快可下调到 1.0，嫌慢可到 1.4。
+
+### 4f. 离谱的 reqVS 来自“假航点”
+
+实测状态窗：`PTH ACTIVE src=ROUTE/MCP targetAlt=3000 ft`、
+`reqVS=-43 fpm`、`vs=-1783 fpm`，备注为
+`VNAV profile to FI07, 2241.8 NM`。2241.8 NM 外的目标显然是航点被错误
+解析（同名 fix 在世界另一处），于是用“高度差 / 2241.8 NM”算出的 -43 fpm
+毫无意义。
+
+两处防护：
+
+1. `NavDatabase::resolve`：同名候选中离当前航路超过 **500 NM** 的 fix
+   视为导航数据同名冲突，不再采用（`out[i]` 保持无效，CDU 航路读取器会
+   用页面上的航向/距离合成该航段）。
+2. `FindVnavTarget` / `FindSpeedTarget`：沿航路累计距离超过 **500 NM**
+   即停止搜索，不再把几千里外的“限制”当成 VNAV 目标。
+
+新增测试：目标位于 720 NM 外时不再 `pathBased`，备注
+`no usable altitude target`，回退为透传。
+
 ## 构建产物（1.2.22，含崩溃修复）
 
 - `win.xpl`：1,116,672 字节
-- SHA256：`0A23DC42F9E4666C0D8DE5B6F7B9EF9DAF4E5DD30D8F221B99C299E355F244F3`
+- SHA256：`194FD04D6E09C6F128A9D2DFFC0D25D953C6EF81BC68E0754BAF1066A225AE22`
 - 安装位置：`plugins\757LVNAVPlus\64\win.xpl`
-- 发布 zip：512,878 字节
-- zip SHA256：`83666AF5781D61A72B94A745F29AFFDB29B26CA57309FA3FDD32D67DBFBB0250`
+- 发布 zip：513,198 字节
+- zip SHA256：`AD89474D2DA62228978F7705663C44EBCD90DC46AE4A9B2B8D5BAE9EE9D553D8`
   （包内 DLL 与上面一致）
 
 > 中间版本（限定符 + 坡度保护，但 Proc 解析仍会崩溃）为
@@ -307,7 +344,11 @@ override，不再与机模争抢。
 > 含权限迟滞、但 before-TOD 仍会在下降中透传的版本为
 > `A62E3CA15A6321F667B5F6B6D1A1A0B1E8EA038539BA40CCF96BA32FC7661DB2`；
 > 含 before-TOD 修复、但进近阶段未交还俯仰的版本为
-> `43985412F15046382992C2F436EB3F77B0F79D2786A7C8109FB425544546648C`。
+> `43985412F15046382992C2F436EB3F77B0F79D2786A7C8109FB425544546648C`；
+> 含进近交还俯仰、但 VNAV 增益仍为 0.8 的版本为
+> `0A23DC42F9E4666C0D8DE5B6F7B9EF9DAF4E5DD30D8F221B99C299E355F244F3`；
+> 增益已调整、但未过滤远处假航点的版本为
+> `111DE964C1FE41BA6B7A4DE531FD53888B01276051BCF451364839A935F6EB31`。
 > 以上均已作废，不要使用。
 
 ## 回滚与归档

@@ -257,6 +257,15 @@ bool NavDatabase::resolve(const std::vector<std::string>& idents, double anchorL
             }
         }
         if (!best) continue;
+        // A same-ident fix far from the running route is a navdata collision
+        // (e.g. an approach fix that only exists elsewhere in the world), not
+        // this route's fix.  Reject it so the CDU reader synthesises the leg
+        // from the printed course/distance instead of building a 2000 NM leg.
+        const double bestNm = std::sqrt(bestDist) * 60.0;
+        if (bestNm > 500.0) {
+            lastError_ = "fix too far from route; ignored";
+            continue;
+        }
         out[i] = *best;
         prevLat = best->lat;
         prevLon = best->lon;

@@ -40,6 +40,16 @@ Fixes VNAV descent fighting the FMC profile.
   `override_artstab=1` for about 1 s.  The `VNAV servo` log showed
   `servos=0 ovrArtstab=1` near approach while the plugin still held priority
   and wrote 8.8 deg of FD pitch into an axis the FF757 had taken back.
+- Faster VNAV response: the default `vnav_vs_gain` is now 1.2 (was 0.8) and
+  `vnav_smoothing_tau_s` 0.10 (was 0.12).  Live report: `vsError=945 fpm`
+  commanded only `+0.75°` (~450 fpm at 343 KT), about half of the physical
+  inverse model (1° ~ 707 fpm at 400 KT).  The new gain is ~85% of that model.
+- Reject implausible route geometry before it reaches VNAV.  A mis-resolved
+  fix produced `FI07` 2241.8 NM ahead and a fake `targetAlt=3000 ft`, so the
+  plugin computed `reqVS=-43 fpm`.  Altitude/speed targets beyond 500 NM are
+  now ignored, and `NavDatabase::resolve` leaves a same-ident fix more than
+  500 NM from the running route unresolved (the CDU reader then synthesises
+  the leg from the printed course and distance).
 - Fixes a crash while reading the FF757 procedure database
   (`Custom Data/STSFF/navdata/Proc/<ICAO>.txt`).  Those files separate
   procedure blocks with blank lines, and `ParseFfProcLines` read field 1 of
