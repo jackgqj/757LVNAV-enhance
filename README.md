@@ -1,5 +1,8 @@
 # 757 LNAV/VNAV Plus
 
+**WARNING：PLEASE DISABLE LNAV ENHANCE AFTER YOU ESTABLISH ILS APP**
+**警告：在ILS建立后立刻断开LNAV增强**
+
 **An independent X-Plane plugin that improves LNAV/VNAV guidance for the FlightFactor 757/767 — it does not modify SASL, the aircraft files, or the FF avionics plugin.**
 
 > 独立的 X-Plane 插件，用于增强 FlightFactor 757/767 的 LNAV / VNAV 表现。它**不修改 SASL**、不改机模文件、也不改 FF 的 avionics 插件；只读取 FF757 公开的数据引用，并写入 X-Plane 标准的导航 / 飞行指引目标数据引用。删掉一个文件夹即可完全移除。
