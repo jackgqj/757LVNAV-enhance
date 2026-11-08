@@ -106,6 +106,11 @@ private:
     int cdiSign_ = 1;   // +1: positive CDI dot means "turn right"
     int cdiDisagreeCount_ = 0;
     int fdRollDisagreeCount_ = 0;
+    // Set once a trusted route cross-track has confirmed the dot sign.  The
+    // FD-roll bootstrap must not flip it afterwards: during a recovery turn
+    // the FF757 banks towards its own course while the aircraft is still off
+    // the CDI, which reads as the opposite sign.
+    bool cdiSignVerified_ = false;
 
     // CDI cross-check hysteresis.  A single frame of disagreement (route
     // rescan, sequencing, a lagging FMS course) must not drop LNAV to GPS CDI

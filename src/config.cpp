@@ -131,6 +131,7 @@ bool Config::load(const std::string& path) {
         else if (key == "lnav_rf_fd_roll") { if (parseBool(value, b)) lnavRfFdRoll = b; }
         else if (key == "lnav_rf_nav_override") { if (parseBool(value, b)) lnavRfNavOverride = b; }
         else if (key == "lnav_heading_direct") { if (parseBool(value, b)) lnavHeadingDirect = b; }
+        else if (key == "lnav_force_cdi") { if (parseBool(value, b)) lnavForceCdi = b; }
         else if (key == "lnav_l1_factor") { if (parseDouble(value, d)) lnavL1Factor = d; }
         else if (key == "lnav_track_damp_gain") { if (parseDouble(value, d)) lnavTrackDampGain = d; }
         else if (key == "lnav_track_damp_max_deg") { if (parseDouble(value, d)) lnavTrackDampMaxDeg = d; }
@@ -216,6 +217,7 @@ bool Config::save(const std::string& path) const {
     out << "lnav_rf_fd_roll=" << (lnavRfFdRoll ? 1 : 0) << "\n";
     out << "lnav_rf_nav_override=" << (lnavRfNavOverride ? 1 : 0) << "\n";
     out << "lnav_heading_direct=" << (lnavHeadingDirect ? 1 : 0) << "\n";
+    out << "lnav_force_cdi=" << (lnavForceCdi ? 1 : 0) << "\n";
     out << "lnav_l1_factor=" << lnavL1Factor << "\n";
     out << "lnav_track_damp_gain=" << lnavTrackDampGain << "\n";
     out << "lnav_track_damp_max_deg=" << lnavTrackDampMaxDeg << "\n";

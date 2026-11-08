@@ -4,7 +4,7 @@
 
 > 独立的 X-Plane 插件，用于增强 FlightFactor 757/767 的 LNAV / VNAV 表现。它**不修改 SASL**、不改机模文件、也不改 FF 的 avionics 插件；只读取 FF757 公开的数据引用，并写入 X-Plane 标准的导航 / 飞行指引目标数据引用。删掉一个文件夹即可完全移除。
 
-当前版本：**v1.2.22**（完整更新见 [`CHANGELOG.md`](CHANGELOG.md)）
+当前版本：**v1.2.26**（完整更新见 [`CHANGELOG.md`](CHANGELOG.md)）
 
 **目录**： [中文](#中文) | [English](#english)
 
@@ -172,6 +172,7 @@ X-Plane 12/Output/757LVNAVPlus.log
 | `757lvnv/toggle_lnav` | LNAV 增强开关 |
 | `757lvnv/toggle_vnav` | VNAV 增强开关 |
 | `757lvnv/toggle_fd_roll` | 实验性 LNAV FD 滚转开关 |
+| `757lvnv/toggle_cdi_source` | LNAV 数据源在 route / GPS CDI 之间切换 |
 | `757lvnv/status_window` | 显示/隐藏状态窗 |
 | `757lvnv/dump` | 把 dataref 诊断写入 `Output/757LVNAVPlus.log` |
 
@@ -262,8 +263,8 @@ MIT，版权 **JACKGONG**。详见 [`LICENSE`](LICENSE)。
 - **JACKGONG** — 757 LNAV/VNAV Plus 作者与维护者。
 - FlightFactor / StepToSky — 757/767 Professional 系列。
 - Laminar Research — X-Plane SDK。
-- 作者留言：在此致敬所有**支持我的社区伙伴与好友**，是你们让我有着动力和带着有效反馈推进这个项目。
- 
+- FF757 社区 — dataref 观测与试飞反馈。
+
 测试后请附上状态窗内容与 `Log.txt` 中的 `[757LVNAV+]` 行，这是改进模式识别与增益默认值最快的方式。
 
 ---
@@ -532,6 +533,7 @@ Commands (bindable in X-Plane):
 | `757lvnv/toggle_lnav` | Toggle LNAV enhancement |
 | `757lvnv/toggle_vnav` | Toggle VNAV enhancement |
 | `757lvnv/toggle_fd_roll` | Toggle the experimental LNAV FD-roll bridge |
+| `757lvnv/toggle_cdi_source` | Toggle the LNAV source between route and GPS CDI |
 | `757lvnv/status_window` | Show/hide the status window |
 | `757lvnv/dump` | Write a dataref diagnostic dump to `Output/757LVNAVPlus.log` |
 
@@ -654,7 +656,7 @@ dependencies and notices are listed in
 - **JACKGONG** — author and maintainer of 757 LNAV/VNAV Plus.
 - FlightFactor / StepToSky for the 757/767 Professional series.
 - Laminar Research for the X-Plane SDK.
-- 作者留言：在此致敬所有**支持我的社区伙伴与好友**，是你们让我有着动力和带着有效反馈推进这个项目。
+- The FF757 community for dataref observations and flight-testing feedback.
 
 If you test this plugin, please include the status-window contents and the
 `[757LVNAV+]` lines from `Log.txt` in your report. That is the fastest way to

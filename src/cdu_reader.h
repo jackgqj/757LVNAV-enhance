@@ -72,7 +72,8 @@ private:
     void abortScan(double elapsed);
     void buildSnapshot();
     void advanceActiveIfNeeded(double elapsed);
-    void updateActiveFromScreen(const CduPage& page);
+    void updateActiveFromScreen(const CduPage& page, double elapsed);
+    bool screenActiveFresh() const;
     bool pageMatchesCache(const CduPage& page) const;
     bool syncActiveFromAirnav(double airnavDistanceNm, double bearingDeg);
     CduRefs* chooseSide(std::vector<std::string>& rows, CduPage& page);
@@ -126,6 +127,14 @@ private:
     RouteSnapshot route_;
     bool cacheValid_ = false;
     int activeIndex_ = 0;
+    // CDU LEGS page 1 line 1 is the waypoint the FMS is actually flying to.
+    // While that page is being read it is the highest-priority active-index
+    // source; the geometric sequencing fallback and the distance heuristic in
+    // buildSnapshot() must not run ahead of it, otherwise they advance a few
+    // legs, page 1 pulls the index back, and the two repeat (live 1.2.24 log:
+    // "CDU active from page 1: 2 (DM) -> 0 (LXA)" every few seconds).
+    int screenActiveIndex_ = -1;
+    double screenActiveAt_ = -1000.0;
     double lastScan_ = -1000.0;
     double lastAirnavDis_ = 0.0;
     bool haveAirnavDis_ = false;

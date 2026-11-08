@@ -55,6 +55,11 @@ struct Config {
     // actually flown by this plugin instead of only monitored.  Disable to
     // leave straight legs to the FF757 and keep the override RF-only.
     bool lnavHeadingDirect = true;
+    // Force the GPS CDI as the lateral source instead of the parsed route.
+    // Useful when the CDU route geometry is suspect (mis-resolved fixes or
+    // procedure waypoints): the plugin then tracks the FF757 GPS CDI directly,
+    // exactly like its automatic fallback, until the switch is turned off.
+    bool lnavForceCdi = false;
     // L1-style cross-track term on straight legs (787 reference).  The basic
     // course capture homes at atan(xtk / distance-to-fix), which on a long leg
     // commands only a fraction of a degree and leaves a small steady offset

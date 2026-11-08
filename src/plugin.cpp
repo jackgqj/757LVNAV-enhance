@@ -1,4 +1,4 @@
-﻿#include "XPLMPlugin.h"
+#include "XPLMPlugin.h"
 #include "XPLMDataAccess.h"
 #include "XPLMProcessing.h"
 #include "XPLMMenus.h"
@@ -244,6 +244,11 @@ double g_lastPitchWriteTime = 0.0;
 int g_pitchWriteCount = 0;
 double g_lastVnavServoLog = -1000.0;
 int g_ffPitchOwnCount = 0;
+double g_lastLnavServoLog = -1000.0;
+double g_lastNavSteerCmd = 0.0;
+double g_navSteerFrameStart = 0.0;
+double g_lastLnavDamp = 0.0;
+double g_lastLnavL1 = 0.0;
 bool g_cockpit2ProbeDone = false;
 bool g_cockpit2Writable = false;
 float g_lastCockpit2RawOut = 1.0e9f;
@@ -304,6 +309,7 @@ XPLMCommandRef g_cmdToggle = nullptr;
 XPLMCommandRef g_cmdLnav = nullptr;
 XPLMCommandRef g_cmdVnav = nullptr;
 XPLMCommandRef g_cmdFdRoll = nullptr;
+XPLMCommandRef g_cmdCdiSource = nullptr;
 XPLMCommandRef g_cmdStatus = nullptr;
 XPLMCommandRef g_cmdDump = nullptr;
 
@@ -1343,6 +1349,7 @@ enum MenuId {
     MI_VNAV,
     MI_SMOOTHING,
     MI_FD_ROLL,
+    MI_CDI_SOURCE,
     MI_CDU_SCAN,
     MI_STATUS,
     MI_RELOAD,
@@ -1367,6 +1374,7 @@ void UpdateMenuChecks() {
     XPLMCheckMenuItem(g_menu, 2, g_config.enableVnav ? xplm_Menu_Checked : xplm_Menu_Unchecked);
     XPLMCheckMenuItem(g_menu, 3, g_config.enableVnavSmoothing ? xplm_Menu_Checked : xplm_Menu_Unchecked);
     XPLMCheckMenuItem(g_menu, 4, g_config.enableLnavFdRoll ? xplm_Menu_Checked : xplm_Menu_Unchecked);
+    XPLMCheckMenuItem(g_menu, 5, g_config.lnavForceCdi ? xplm_Menu_Checked : xplm_Menu_Unchecked);
 }
 
 void SetWindowVisible(bool visible) {
@@ -1424,6 +1432,18 @@ void ToggleFdRoll() {
     Logf("LNAV FD roll bridge %s", g_config.enableLnavFdRoll ? "enabled" : "disabled");
 }
 
+void ToggleCdiSource() {
+    g_config.lnavForceCdi = !g_config.lnavForceCdi;
+    // Drop the stale heading latch so the next frame starts from the new
+    // source instead of holding the previous route course.
+    ClearNavHeadingOverride();
+    g_guidance.reset();
+    SaveConfig();
+    UpdateMenuChecks();
+    Logf("LNAV source: %s",
+         g_config.lnavForceCdi ? "GPS CDI (forced)" : "route");
+}
+
 void ReloadConfig() {
     g_config.load(ConfigPath());
     g_config.clampValues();
@@ -1468,6 +1488,7 @@ void MenuHandler(void* menuRef, void* itemRef) {
         case MI_VNAV: ToggleVnav(); break;
         case MI_SMOOTHING: ToggleSmoothing(); break;
         case MI_FD_ROLL: ToggleFdRoll(); break;
+        case MI_CDI_SOURCE: ToggleCdiSource(); break;
         case MI_CDU_SCAN:
             g_routeReader.requestScan();
             Logf("CDU route rescan requested");
@@ -1495,6 +1516,7 @@ int CommandHandler(XPLMCommandRef cmd, XPLMCommandPhase phase, void* refcon) {
         case MI_LNAV: ToggleLnav(); break;
         case MI_VNAV: ToggleVnav(); break;
         case MI_FD_ROLL: ToggleFdRoll(); break;
+        case MI_CDI_SOURCE: ToggleCdiSource(); break;
         case MI_CDU_SCAN:
             g_routeReader.requestScan();
             Logf("CDU route rescan requested");
@@ -1526,6 +1548,7 @@ void CreateMenuAndCommands() {
         XPLMAppendMenuItem(g_menu, "VNAV enhancement", reinterpret_cast<void*>(MI_VNAV), 1);
         XPLMAppendMenuItem(g_menu, "VNAV smoothing", reinterpret_cast<void*>(MI_SMOOTHING), 1);
         XPLMAppendMenuItem(g_menu, "LNAV FD roll (experimental)", reinterpret_cast<void*>(MI_FD_ROLL), 1);
+        XPLMAppendMenuItem(g_menu, "LNAV source: GPS CDI", reinterpret_cast<void*>(MI_CDI_SOURCE), 1);
         XPLMAppendMenuItem(g_menu, "Rescan CDU route", reinterpret_cast<void*>(MI_CDU_SCAN), 1);
         XPLMAppendMenuItem(g_menu, "Show status window", reinterpret_cast<void*>(MI_STATUS), 1);
         XPLMAppendMenuItem(g_menu, "Reload config", reinterpret_cast<void*>(MI_RELOAD), 1);
@@ -1541,11 +1564,13 @@ void CreateMenuAndCommands() {
     g_cmdStatus = XPLMCreateCommand("757lvnv/status_window", "Toggle status window");
     g_cmdDump = XPLMCreateCommand("757lvnv/dump", "Dump 757 LNAV/VNAV Plus diagnostics");
     g_cmdFdRoll = XPLMCreateCommand("757lvnv/toggle_fd_roll", "Toggle experimental LNAV FD roll bridge");
+    g_cmdCdiSource = XPLMCreateCommand("757lvnv/toggle_cdi_source", "Toggle LNAV source between route and GPS CDI");
 
     if (g_cmdToggle) XPLMRegisterCommandHandler(g_cmdToggle, CommandHandler, 1, reinterpret_cast<void*>(MI_ENABLE));
     if (g_cmdLnav) XPLMRegisterCommandHandler(g_cmdLnav, CommandHandler, 1, reinterpret_cast<void*>(MI_LNAV));
     if (g_cmdVnav) XPLMRegisterCommandHandler(g_cmdVnav, CommandHandler, 1, reinterpret_cast<void*>(MI_VNAV));
     if (g_cmdFdRoll) XPLMRegisterCommandHandler(g_cmdFdRoll, CommandHandler, 1, reinterpret_cast<void*>(MI_FD_ROLL));
+    if (g_cmdCdiSource) XPLMRegisterCommandHandler(g_cmdCdiSource, CommandHandler, 1, reinterpret_cast<void*>(MI_CDI_SOURCE));
     if (g_cmdStatus) XPLMRegisterCommandHandler(g_cmdStatus, CommandHandler, 1, reinterpret_cast<void*>(MI_STATUS));
     if (g_cmdDump) XPLMRegisterCommandHandler(g_cmdDump, CommandHandler, 1, reinterpret_cast<void*>(MI_DUMP));
 }
@@ -1555,9 +1580,11 @@ void DestroyMenuAndCommands() {
     if (g_cmdLnav) XPLMUnregisterCommandHandler(g_cmdLnav, CommandHandler, 1, reinterpret_cast<void*>(MI_LNAV));
     if (g_cmdVnav) XPLMUnregisterCommandHandler(g_cmdVnav, CommandHandler, 1, reinterpret_cast<void*>(MI_VNAV));
     if (g_cmdFdRoll) XPLMUnregisterCommandHandler(g_cmdFdRoll, CommandHandler, 1, reinterpret_cast<void*>(MI_FD_ROLL));
+    if (g_cmdCdiSource) XPLMUnregisterCommandHandler(g_cmdCdiSource, CommandHandler, 1, reinterpret_cast<void*>(MI_CDI_SOURCE));
     if (g_cmdStatus) XPLMUnregisterCommandHandler(g_cmdStatus, CommandHandler, 1, reinterpret_cast<void*>(MI_STATUS));
     if (g_cmdDump) XPLMUnregisterCommandHandler(g_cmdDump, CommandHandler, 1, reinterpret_cast<void*>(MI_DUMP));
-    g_cmdToggle = g_cmdLnav = g_cmdVnav = g_cmdFdRoll = g_cmdStatus = g_cmdDump = nullptr;
+    g_cmdToggle = g_cmdLnav = g_cmdVnav = g_cmdFdRoll = g_cmdCdiSource =
+        g_cmdStatus = g_cmdDump = nullptr;
     if (g_menu) {
         XPLMDestroyMenu(g_menu);
         g_menu = nullptr;
@@ -1997,6 +2024,10 @@ float FlightLoopCallback(float elapsedSinceLastCall, float, int, void*) {
         // Sample the flag before this frame's writes so the RF override logic
         // can tell whether the model let our previous write survive.
         g_navOverrideAtFrameStart = RdI(g_refs.overrideNavHeading);
+        // Sample the previous frame's nav target before overwriting it: if it
+        // differs from our last command, something else (the FF757) is also
+        // publishing nav_steer.
+        g_navSteerFrameStart = RdF(g_refs.navSteer, NAN);
 
         g_lnav = g_guidance.computeLnav(g_state, g_routeReader.route(), g_cdi, g_config);
         g_vnav = g_guidance.computeVnav(g_state, g_routeReader.route(), g_config, dt);
@@ -2013,6 +2044,8 @@ float FlightLoopCallback(float elapsedSinceLastCall, float, int, void*) {
             const bool headingDirect = g_config.lnavHeadingDirect ||
                                        (rfArcNow && g_config.lnavRfNavOverride);
             double navTargetMag = normalize360(g_lnav.desiredCourseMagDeg);
+            double dampUsed = 0.0;
+            double l1Used = 0.0;
             if (g_refs.navSteerWritable) {
                 if (headingDirect) {
                     // The nav controller consumes nav_steer_deg_mag as a
@@ -2029,6 +2062,7 @@ float FlightLoopCallback(float elapsedSinceLastCall, float, int, void*) {
                         clampd(-g_config.lnavTrackDampGain * trackErr,
                                -g_config.lnavTrackDampMaxDeg,
                                g_config.lnavTrackDampMaxDeg);
+                    dampUsed = damp;
                     const double wca = Finite(headingMag)
                                            ? normalize180(headingMag - trackMag)
                                            : 0.0;
@@ -2052,10 +2086,14 @@ float FlightLoopCallback(float elapsedSinceLastCall, float, int, void*) {
                             -g_lnav.xtkNm, std::max(0.2, g_lnav.distanceNm)));
                         const double l1Deg = rad2deg(std::atan2(-g_lnav.xtkNm, l1));
                         const double extra = clampd(l1Deg - homingDeg, -4.0, 4.0);
+                        l1Used = extra;
                         navTargetMag = normalize360(navTargetMag + extra);
                     }
                 }
                 XPLMSetDataf(g_refs.navSteer, static_cast<float>(navTargetMag));
+                g_lastNavSteerCmd = navTargetMag;
+                g_lastLnavDamp = dampUsed;
+                g_lastLnavL1 = l1Used;
                 navWritten = true;
                 if (!g_state.lnavOverride && !headingDirect) {
                     g_lnav.note = "nav target write (override_nav_heading=0)";
@@ -2134,6 +2172,27 @@ float FlightLoopCallback(float elapsedSinceLastCall, float, int, void*) {
             ClearNavHeadingOverride();
         }
         const bool lnavWritten = navWritten || rollWritten;
+
+        // Periodic LNAV diagnostic: compare the plugin's route cross-track and
+        // target with the FF757's GPS CDI and with the previous nav_steer read
+        // so a slow straight-leg drift can be traced to geometry, the steering
+        // command, or another controller overwriting nav_steer.
+        if (g_lnav.active && XPLMGetElapsedTime() - g_lastLnavServoLog > 5.0) {
+            g_lastLnavServoLog = XPLMGetElapsedTime();
+            const double trackMag =
+                magneticFromTrue(g_state.trackTrueDeg, g_state.magVarDeg);
+            Logf("LNAV servo: src=%s track=%.1f base=%.1f course=%.1f "
+                 "xtk=%+.2f dist=%.1f corr=%+.2f cmd=%.1f prev=%.1f "
+                 "damp=%+.2f l1=%+.2f ovr=%d fmsDot=%+.3f turn=%.0f "
+                 "active=%d next=%d",
+                 g_lnav.source.c_str(), trackMag, g_lnav.baseCourseMagDeg,
+                 g_lnav.desiredCourseMagDeg, g_lnav.xtkNm, g_lnav.distanceNm,
+                 g_lnav.correctionDeg, g_lastNavSteerCmd,
+                 g_navSteerFrameStart, g_lastLnavDamp, g_lastLnavL1,
+                 g_state.lnavOverride ? 1 : 0,
+                 RdF(g_refs.gpsHdefDot, NAN), g_lnav.turnProgress,
+                 g_lnav.activeWpt, g_lnav.nextLeg);
+        }
 
         bool pitchWritten = false;
         if (g_config.enableVnav && g_state.apEngaged && g_state.vnavMode) {

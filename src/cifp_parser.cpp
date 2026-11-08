@@ -155,7 +155,17 @@ std::vector<RfArcRow> CifpDatabase::ParseFfProcLines(
     std::string prevIdent;
     for (const std::string& line : lines) {
         const std::vector<std::string> p = SplitComma(line);
-        if (p.empty()) { prevIdent.clear(); continue; }
+        // SplitComma never returns an empty vector: a blank line yields one
+        // empty field.  A one-field row (blank line, "RF" alone, junk) has no
+        // p[1], and an unconditional prevIdent assignment below reads past the
+        // vector and crashes inside Trim (0xc0000005, cifp_parser.cpp Trim+0xa5,
+        // win.xpl +0x2b445 on startup).
+        //
+        // PROTECTED GUARD - DO NOT REMOVE, WEAKEN, OR RESTRUCTURE THIS CHECK
+        // WITHOUT EXPLICIT USER APPROVAL.  It was fixed in 1.2.22, lost during
+        // a source rebuild, and crashed again in 1.2.25; every p[1] use below
+        // depends on this early continue.
+        if (p.size() < 2) { prevIdent.clear(); continue; }
         const std::string kind = Upper(Trim(p[0]));
         if (kind == "SID" || kind == "STAR" || kind == "APPCH" || kind == "AIRPORT") {
             prevIdent.clear();
@@ -181,6 +191,7 @@ std::vector<RfArcRow> CifpDatabase::ParseFfProcLines(
                 if (!dup) arcs.push_back(a);
             }
         }
+        // Protected: reached only because p.size() >= 2 is enforced above.
         prevIdent = Upper(Trim(p[1]));
     }
     return arcs;
@@ -285,7 +296,15 @@ bool CifpDatabase::findRfArcByExit(const std::string& exitIdent,
     if (negative_.count(key) != 0) return false;
 
     const auto near = nearestAirports(anchorLat, anchorLon);
+    // Exit-only matching is weak: any airport within 120 NM can offer an arc
+    // whose exit ident happens to match.  A live case borrowed the ZULS RF
+    // arc LS987 -> (INTC) onto an enroute fix 67 NM from that airport and
+    // dragged LNAV 12.8 NM off course.  An RF arc that belongs to the active
+    // leg terminates near its procedure airport, so restrict the search to a
+    // plausible terminal-area radius.
+    constexpr double kMaxProcedureAirportNm = 40.0;
     for (const auto& candidate : near) {
+        if (candidate.first > kMaxProcedureAirportNm) continue;
         const std::vector<RfArcRow>& arcs =
             ffArcsForAirport(airports_[candidate.second].ident);
         for (const RfArcRow& arc : arcs) {
@@ -296,6 +315,7 @@ bool CifpDatabase::findRfArcByExit(const std::string& exitIdent,
         }
     }
     for (const auto& candidate : near) {
+        if (candidate.first > kMaxProcedureAirportNm) continue;
         const std::vector<RfArcRow>& arcs =
             arcsForAirport(airports_[candidate.second].ident);
         for (const RfArcRow& arc : arcs) {

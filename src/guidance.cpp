@@ -211,6 +211,7 @@ void Guidance::reset() {
     cdiSign_ = 1;
     cdiDisagreeCount_ = 0;
     fdRollDisagreeCount_ = 0;
+    cdiSignVerified_ = false;
     cdiCourseRejectCount_ = 0;
     cdiDistRejectCount_ = 0;
     holdValid_ = false;
@@ -323,7 +324,7 @@ LnavResult Guidance::computeLnav(const AircraftState& state,
     const double currentTrackMag = currentMagTrack(state);
     const double maxError = cfg.lnavMaxCourseErrorDeg;
 
-    bool useRoute = route.valid && route.sourceRoute &&
+    bool useRoute = !cfg.lnavForceCdi && route.valid && route.sourceRoute &&
                     route.activeWpt >= 0 && route.activeLeg >= 0;
     bool complexLeg = false;
     double routeXtkRight = 0.0;
@@ -388,7 +389,26 @@ LnavResult Guidance::computeLnav(const AircraftState& state,
             // Lead in only while still short of the entry radial; past it the
             // entry fix is behind the aircraft and steering there would turn
             // it around.
-            if (swept < -0.5) {
+            //
+            // An exit-only CIFP match (entry fix missing from the route cache)
+            // can borrow an RF arc from an unrelated airport's procedure that
+            // merely shares the exit ident.  Live: LS987 -> (INTC) from the
+            // ZULS database ended on the enroute fix and its 145.7 deg tangent
+            // was flown while the aircraft was established on the 091.6 leg,
+            // creating a 12.8 NM phantom cross-track.  Require the FMS course
+            // to roughly agree with the arc's entry tangent before taking over
+            // in that case.  A pair match with the entry fix in the route is
+            // specific enough and stays purely geometric (RNP segments).
+            bool entryCourseAgrees = true;
+            if (idx < 0 && cdi.valid) {
+                const double tangent =
+                    normalize360(leg->rfRadialStartDeg + dir * 90.0);
+                const double fmsTrue =
+                    trueFromMagnetic(cdi.courseMagDeg, state.magVarDeg);
+                entryCourseAgrees =
+                    std::abs(normalize180(tangent - fmsTrue)) <= 30.0;
+            }
+            if (swept < -0.5 && entryCourseAgrees) {
                 rfLeadIn = true;
                 rfEntryIdx = idx;
                 const RouteWaypoint* prevW = route.waypoint(idx - 1);
@@ -658,9 +678,15 @@ LnavResult Guidance::computeLnav(const AircraftState& state,
                             if (++cdiDisagreeCount_ >= 5) {
                                 cdiSign_ = -cdiSign_;
                                 cdiDisagreeCount_ = 0;
+                                cdiSignVerified_ = true;
                             }
                         } else {
                             cdiDisagreeCount_ = 0;
+                            // A real route cross-track (> 0.15 NM) that agrees
+                            // with the CDI settles the sign.  Freeze it: the
+                            // FD-roll bootstrap in the CDI branch misreads a
+                            // recovery turn as a sign change.
+                            if (std::abs(xtk) > 0.15) cdiSignVerified_ = true;
                         }
                     }
 
@@ -911,19 +937,32 @@ LnavResult Guidance::computeLnav(const AircraftState& state,
 
     if (!useRoute && !complexLeg && cdi.valid && cdi.distanceNm >= cfg.lnavMinDistanceNm) {
         // Calibrate the CDI dot sign against the bank the FF757 is actually
-        // commanding.  This keeps the plugin aligned with the aircraft's own
-        // LNAV sense even when the private route data is unavailable.
-        if (!cdi.signIsCorrection && std::abs(state.fdRollDeg) > 8.0 &&
+        // commanding.  This is a bootstrap only: once a trusted route
+        // cross-track has confirmed the sign, or when the user forces the GPS
+        // CDI source, the sign stays frozen.  During a recovery turn the
+        // FF757 banks towards its own course while the aircraft is still off
+        // the CDI, so a live disagreement reads as the opposite sign (live:
+        // xtk +0.97 -> -0.89, corr -3.46 -> +3.41, steering away from the
+        // course for the rest of the segment).  Require the track to be
+        // aligned with the CDI course and the disagreement to persist ~2 s
+        // before flipping.
+        const double cdiTrackErrDeg =
+            std::abs(normalize180(currentTrackMag - cdi.courseMagDeg));
+        if (!cdi.signIsCorrection && !cdiSignVerified_ && !cfg.lnavForceCdi &&
+            cdiTrackErrDeg < 10.0 && std::abs(state.fdRollDeg) > 8.0 &&
             std::abs(cdi.xtkNm) > 0.1) {
             const double cdiCorrection = cdiSign_ * cdi.xtkNm;
             if (cdiCorrection * state.fdRollDeg < 0.0) {
-                if (++fdRollDisagreeCount_ >= 10) {
+                if (++fdRollDisagreeCount_ >= 120) {
                     cdiSign_ = -cdiSign_;
                     fdRollDisagreeCount_ = 0;
+                    cdiSignVerified_ = true;
                 }
             } else {
                 fdRollDisagreeCount_ = 0;
             }
+        } else {
+            fdRollDisagreeCount_ = 0;
         }
 
         const double dist = std::max(cdi.distanceNm, 0.2);
@@ -955,7 +994,10 @@ LnavResult Guidance::computeLnav(const AircraftState& state,
                    cfg.lnavMaxRollCorrectionDeg);
         out.turnProgress = 0.0;
         out.source = "GPS CDI";
-        if (out.note.empty()) out.note = "route fallback: GPS CDI";
+        if (out.note.empty()) {
+            out.note = cfg.lnavForceCdi ? "GPS CDI source (forced)"
+                                        : "route fallback: GPS CDI";
+        }
         return out;
     }
 

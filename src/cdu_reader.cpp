@@ -10,6 +10,7 @@
 #include <cstring>
 
 #include "XPLMUtilities.h"
+#include "XPLMProcessing.h"
 
 namespace lvnv {
 
@@ -77,6 +78,22 @@ std::string PageSignature(const CduPage& page) {
         if (leg.hold) s += 'H';
     }
     return s;
+}
+
+// True when the aircraft has already passed a waypoint along its outbound
+// leg.  Used to tell a genuinely stale CDU page from a page that is merely
+// lagging behind the geometric sequencing.
+bool WaypointBehind(const RouteSnapshot& route, int idx, double lat, double lon) {
+    const RouteWaypoint* cur = route.waypoint(idx);
+    const RouteWaypoint* nxt = route.waypoint(idx + 1);
+    if (!cur || !nxt || !cur->posValid || !nxt->posValid) return false;
+    const double crs = bearingTrue(cur->lat, cur->lon, nxt->lat, nxt->lon);
+    const double midLatRad = deg2rad((lat + cur->lat) * 0.5);
+    const double northNm = (lat - cur->lat) * 60.0;
+    const double eastNm = (lon - cur->lon) * 60.0 * std::cos(midLatRad);
+    const double alongNm =
+        northNm * std::cos(deg2rad(crs)) + eastNm * std::sin(deg2rad(crs));
+    return std::isfinite(alongNm) && alongNm > 0.3;
 }
 
 } // namespace
@@ -300,6 +317,22 @@ bool CduRouteReader::syncActiveFromAirnav(double airnavDistanceNm, double bearin
     double bestDistDiff = 0.0;
     double bestBrgDiff = 0.0;
 
+    // The FF757 computes pseudo-fixes such as (INTC) on top of an existing
+    // waypoint, so two route entries can sit at the same coordinates.  Distance
+    // and bearing alone then pick the lowest index, and the active leg jumps
+    // backwards: live, active moved from UGOVA (index 2) to (INTC) (index 0)
+    // at the same position, the CIFP annotated the stale leg with the ZULS RF
+    // arc LS987, and LNAV flew 12.8 NM off the real course.  Collect every
+    // near-tied candidate and keep the one closest to the current active
+    // index instead of rewinding.
+    struct Candidate {
+        int index;
+        double score;
+        double distDiff;
+        double brgDiff;
+    };
+    std::vector<Candidate> candidates;
+
     for (int i = 0; i < count; ++i) {
         const RouteWaypoint& w = route_.wpts[static_cast<size_t>(i)];
         if (!w.posValid) continue;
@@ -315,6 +348,7 @@ bool CduRouteReader::syncActiveFromAirnav(double airnavDistanceNm, double bearin
         if (bDiff > 35.0) continue;
 
         const double score = dDiff * 10.0 + bDiff * 0.1;
+        candidates.push_back(Candidate{i, score, dDiff, bDiff});
         if (score < bestScore) {
             bestScore = score;
             bestDistDiff = dDiff;
@@ -324,6 +358,26 @@ bool CduRouteReader::syncActiveFromAirnav(double airnavDistanceNm, double bearin
     }
 
     if (best < 0 || bestDistDiff > 1.5 || bestBrgDiff > 25.0) return false;
+
+    // Tie-break: 0.5 score is 0.05 NM or 5 deg, enough to treat two fixes at
+    // the same point as equal without merging genuinely distinct waypoints.
+    if (activeIndex_ >= 0 && activeIndex_ < count) {
+        int chosen = best;
+        double chosenGap = std::abs(best - activeIndex_);
+        for (const Candidate& c : candidates) {
+            if (c.score > bestScore + 0.5 || c.distDiff > 1.5 || c.brgDiff > 25.0) {
+                continue;
+            }
+            const double gap = std::abs(c.index - activeIndex_);
+            if (gap < chosenGap) {
+                chosen = c.index;
+                chosenGap = gap;
+                bestDistDiff = c.distDiff;
+                bestBrgDiff = c.brgDiff;
+            }
+        }
+        best = chosen;
+    }
 
     if (best != activeIndex_) {
         Logf("CDU active sync: %d (%s) -> %d (%s) airnavDist=%.2f brg=%.1f dDiff=%.2f bDiff=%.1f",
@@ -417,7 +471,7 @@ void CduRouteReader::pollIdle(double elapsed) {
         return;
     }
 
-    updateActiveFromScreen(page);
+    updateActiveFromScreen(page, elapsed);
 }
 
 void CduRouteReader::startScan(const CduPage& page, CduRefs& refs, double elapsed) {
@@ -577,6 +631,12 @@ void CduRouteReader::finishScan(double elapsed) {
              cache_.legs.size());
     } else if (haveNewRoute) {
         int initialActive = 0;
+        // Waypoint to keep active across the rescan.  A rescan used to reset
+        // activeIndex_ to 0 every time, which restarted the page-1/geometry
+        // tug-of-war around the ZULS pseudo-fixes.  While the LEGS page is
+        // authoritative, keep the waypoint that page 1 is showing; otherwise
+        // keep the current one by ident.
+        std::string keepActiveId;
         // The FF757 LEGS page usually starts at the active waypoint, so a
         // rescan mid-route drops the fix behind it.  Keep the previously
         // scanned inbound fix when the new page set starts at the old active
@@ -588,6 +648,13 @@ void CduRouteReader::finishScan(double elapsed) {
             if (oldActive >= static_cast<int>(cache_.legs.size())) {
                 oldActive = static_cast<int>(cache_.legs.size()) - 1;
             }
+            int keepIdx = oldActive;
+            if (screenActiveFresh() && screenActiveIndex_ >= 0 &&
+                screenActiveIndex_ < static_cast<int>(cache_.legs.size())) {
+                keepIdx = screenActiveIndex_;
+            }
+            keepActiveId = cache_.legs[static_cast<size_t>(keepIdx)].id;
+
             const std::string& newFirst = merged.legs.front().id;
             if (oldActive > 0 && !newFirst.empty() &&
                 cache_.legs[static_cast<size_t>(oldActive)].id == newFirst) {
@@ -600,6 +667,19 @@ void CduRouteReader::finishScan(double elapsed) {
         cache_ = merged;
         cacheValid_ = true;
         activeIndex_ = initialActive;
+        if (!keepActiveId.empty()) {
+            int match = -1;
+            int bestDelta = 1 << 30;
+            for (int i = 0; i < static_cast<int>(cache_.legs.size()); ++i) {
+                if (cache_.legs[static_cast<size_t>(i)].id != keepActiveId) continue;
+                const int delta = std::abs(i - initialActive);
+                if (delta < bestDelta) {
+                    bestDelta = delta;
+                    match = i;
+                }
+            }
+            if (match >= 0) activeIndex_ = match;
+        }
         buildSnapshot();
         if (route_.valid) {
             lastError_.clear();
@@ -642,9 +722,16 @@ void CduRouteReader::advanceActiveIfNeeded(double elapsed) {
         double lon = 0.0;
         readAircraftPosition(lat, lon);
         if (ValidLatLon(lat, lon)) {
+            const bool pageFresh = screenActiveFresh();
             for (int guard = 0; guard < 10; ++guard) {
                 const int last = static_cast<int>(route_.wpts.size()) - 1;
                 if (activeIndex_ < 0 || activeIndex_ + 1 > last) break;
+                // Page 1 line 1 is what the FMS is flying to.  While it is
+                // authoritative, geometry may catch up to it but must not
+                // advance past it; otherwise this fallback walked through the
+                // ZULS pseudo-fixes to DM and page 1 pulled the index back
+                // every few seconds (active-index tug-of-war).
+                if (pageFresh && activeIndex_ >= screenActiveIndex_) break;
                 const RouteWaypoint& cur = route_.wpts[static_cast<size_t>(activeIndex_)];
                 const RouteWaypoint& nxt = route_.wpts[static_cast<size_t>(activeIndex_ + 1)];
                 if (!cur.posValid || !nxt.posValid) break;
@@ -703,7 +790,15 @@ void CduRouteReader::advanceActiveIfNeeded(double elapsed) {
     haveAirnavDis_ = true;
 }
 
-void CduRouteReader::updateActiveFromScreen(const CduPage& page) {
+bool CduRouteReader::screenActiveFresh() const {
+    // Page polls run every 0.5 s while a LEGS page is displayed.  Ten seconds
+    // covers a short CDU visit to another page; after that the geometric
+    // sequencing fallback takes over again (CDU left elsewhere).
+    return screenActiveIndex_ >= 0 &&
+           XPLMGetElapsedTime() - screenActiveAt_ < 10.0;
+}
+
+void CduRouteReader::updateActiveFromScreen(const CduPage& page, double elapsed) {
     if (!cacheValid_ || page.page != 1 || page.legs.empty()) return;
     // A MOD/reference page must never move the active waypoint.
     if (!page.activeRoute) return;
@@ -730,6 +825,26 @@ void CduRouteReader::updateActiveFromScreen(const CduPage& page) {
         scanRequested_ = true;
         return;
     }
+    // A page that still shows a waypoint the aircraft has already passed is
+    // lagging the FMS sequencing (live 1.2.24: page 1 kept showing LXA while
+    // the aircraft was 10+ NM past it, and every poll pulled the index back
+    // from DM).  Do not rewind onto it; let the geometric sequencing own the
+    // index until the page catches up.
+    if (match < activeIndex_) {
+        double lat = 0.0;
+        double lon = 0.0;
+        readAircraftPosition(lat, lon);
+        if (ValidLatLon(lat, lon) && WaypointBehind(route_, match, lat, lon)) {
+            screenActiveIndex_ = -1;
+            screenActiveAt_ = -1000.0;
+            return;
+        }
+    }
+    // Refresh the authority timestamp even when the index does not change.
+    // Page 1 is displayed every 0.5 s, so this keeps the geometric sequencing
+    // fallback capped while the page stays in view.
+    screenActiveIndex_ = match;
+    screenActiveAt_ = elapsed;
     if (match == activeIndex_) return;
 
     Logf("CDU active from page 1: %d (%s) -> %d (%s)",
@@ -831,7 +946,7 @@ void CduRouteReader::buildSnapshot() {
     // is already downstream; after such a scan activeIndex_ would otherwise
     // point at the origin.  The FF757 AirnavDis value is exactly the distance
     // to its active waypoint, so it makes a reliable anchor.
-    if (airnavDistance > 1.0 && fromTo != 0 && count > 1) {
+    if (airnavDistance > 1.0 && fromTo != 0 && count > 1 && !screenActiveFresh()) {
         int best = -1;
         double bestDiff = 1.0e30;
         for (int i = 0; i < static_cast<int>(count); ++i) {

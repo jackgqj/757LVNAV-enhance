@@ -1,5 +1,84 @@
 # Changelog
 
+## 1.2.26 — 2026-11-08
+
+Fixes the startup crash in the FF757 procedure parser.
+
+- `ParseFfProcLines` crashed with 0xc0000005 inside `Trim` (resolved from
+  `win.xpl` fault offset 0x2b445, `cifp_parser.cpp:21`).  `SplitComma` never
+  returns an empty vector, so a blank line or a bare `RF` row gives a
+  one-element vector, and the unconditional `prevIdent = Trim(p[1])` read past
+  the end of it.  This is the same crash class fixed in 1.2.22; the guard had
+  been lost when the source was rebuilt.  The parser now requires `p.size() >= 2`
+  before touching `p[1]`.
+- Verified against all 7,321 `Custom Data/STSFF/navdata/Proc/*.txt` files
+  (3,625 RF arcs parsed, 0 unreadable).
+- Tests: guidance 177, CDU 39, CIFP 21 (was 18; three checks cover the
+  one-field-row chain reset).
+
+## 1.2.25 — 2026-11-08
+
+Stops the active-waypoint tug-of-war around dynamic pseudo-fixes.
+
+- The CDU LEGS page 1 waypoint is the highest-priority active-index source
+  while that page is displayed.  Every rescan used to reset the active index to
+  0, the geometric sequencing fallback then advanced it through `(INTC)` to
+  `DM`, and page 1 pulled it back: the 1.2.24 log repeated `CDU active from
+  page 1: 2 (DM) -> 0 (LXA)` every few seconds and kept logging `route distance
+  disagrees with CDI (sustained)` with GPS CDI fallbacks.  Rescans now keep the
+  page waypoint (or the current waypoint by ident), and the geometric fallback
+  and the Airnav distance heuristic may catch up to the page index but not run
+  ahead of it.
+- A CDU page that still shows a waypoint the aircraft has already passed is
+  treated as stale and may not rewind the index.  This keeps sequencing
+  physical when the FF757 page lags through a course reversal.
+- No guidance-law change.  Tests unchanged: guidance 177, CDU 39, CIFP 18.
+
+## 1.2.24 — 2026-11-08
+
+Fixes the straight-leg fly-off after a CDU route re-sync.
+
+- CDU active-waypoint sync no longer rewinds across coincident fixes.  The
+  FF757 computes pseudo-fixes such as `(INTC)` on top of an existing waypoint,
+  so two route entries share the same coordinates; distance/bearing matching
+  picked the lowest index and moved the active leg from `UGOVA` (index 2) back
+  to `(INTC)` (index 0) (live `CDU active sync: 2 (UGOVA) -> 0 ((INTC))`).
+  Near-tied candidates now keep the one closest to the current active index.
+- Exit-only CIFP RF matching is restricted to procedures whose airport is
+  within 40 NM of the exit fix.  The rewind let the plugin borrow the ZULS RF
+  arc `LS987 -> (INTC)` for an enroute leg 67 NM away; the arc's 145.7 deg
+  entry tangent replaced the 091.6 deg leg and produced a 12.8 NM phantom
+  cross-track with the intercept saturated at 30 deg while the FF757 CDI was
+  centered (`fmsDot=+0.004`).
+- Second guard: an RF lead-in whose entry fix is missing from the route cache
+  now requires the FMS course to agree with the arc entry tangent within 30 deg.
+  A genuine pair match with the entry fix in the route stays purely geometric,
+  so RNP segments are unaffected.
+- The GPS CDI dot-sign bootstrap is frozen once a trusted route cross-track has
+  confirmed it, and is disabled while `lnav_force_cdi` is on.  It also requires
+  the track to be aligned with the CDI course and ~2 s of continuous
+  disagreement.  Live: during the recovery turn `fmsDot` stayed around -1.1
+  (right of course) while `xtk` flipped +0.97 -> -0.89 and `corr` -3.46 ->
+  +3.41, so the plugin steered away from the course for the rest of the
+  segment.
+- Tests: guidance 177 (was 171), CDU 39, CIFP 18.
+
+## 1.2.23 — 2026-11-08
+
+LNAV source switch and diagnostics.
+
+- Added **LNAV source: GPS CDI** (menu `Plugins -> 757 LNAV/VNAV Plus`, config
+  `lnav_force_cdi=1`, command `757lvnv/toggle_cdi_source`).  While enabled the
+  plugin ignores the parsed route and tracks the FF757 GPS CDI directly, using
+  the same path as the automatic fallback; the status window shows
+  `src=GPS CDI` and the note `GPS CDI source (forced)`.  Useful when the CDU
+  route geometry is suspect.
+- Added a throttled `LNAV servo` diagnostic (every 5 s): route `xtk`, base and
+  desired course, `fmsDot`, commanded `nav_steer`, previous-frame readback,
+  damping and L1 terms, and the override flag.  It distinguishes a geometry
+  problem from the FF757 overwriting `nav_steer`.
+- No VNAV behaviour change in this build.
+
 ## 1.2.22 — 2026-11-07
 
 Fixes VNAV descent fighting the FMC profile.
