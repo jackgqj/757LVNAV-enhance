@@ -4,7 +4,7 @@
 
 > 独立的 X-Plane 插件，用于增强 FlightFactor 757/767 的 LNAV / VNAV 表现。它**不修改 SASL**、不改机模文件、也不改 FF 的 avionics 插件；只读取 FF757 公开的数据引用，并写入 X-Plane 标准的导航 / 飞行指引目标数据引用。删掉一个文件夹即可完全移除。
 
-当前版本：**v1.2.33**（完整更新见 [`CHANGELOG.md`](CHANGELOG.md)）
+当前版本：**v1.2.36**（完整更新见 [`CHANGELOG.md`](CHANGELOG.md)）
 
 **目录**： [中文](#中文) | [English](#english)
 

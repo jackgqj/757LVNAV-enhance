@@ -536,9 +536,17 @@ LnavResult Guidance::computeLnav(const AircraftState& state,
             // a genuinely uncapturable arc falls through to the FF757 here.
             useRoute = false;
             complexLeg = true;
-            out.note = leg->rfArc
-                           ? "RF arc not captured yet; passing through"
-                           : "active leg is a multi-point leg; passing through";
+            if (leg->hold) {
+                const RouteWaypoint* w = route.waypoint(leg->lastWpt);
+                out.source = "HOLD PASS";
+                out.note = "HOLD at ";
+                out.note += (w && !w->id.empty()) ? w->id : "fix";
+                out.note += ": FF757 owns the hold";
+            } else {
+                out.note = leg->rfArc
+                               ? "RF arc not captured yet; passing through"
+                               : "active leg is a multi-point leg; passing through";
+            }
         } else {
             // RF lead-in tracks the inbound course to the arc entry fix; a
             // normal leg uses its own endpoints.
@@ -1343,10 +1351,12 @@ VnavResult Guidance::computeVnav(const AircraftState& state,
                         if (spd.valid && speedHoldLead > 0.0) {
                             std::snprintf(note, sizeof(note),
                                           "VNAV profile to %s, %.1f NM, %.0f ft%s"
+                                          " | alt=%.0f gs=%.0f delta=%+.0f"
                                           " | speed %d kt @ %.0f NM, decel lead %.1f NM%s%s",
                                           target.id.empty() ? "WPT" : target.id.c_str(),
                                           target.distanceNm, profileAlt,
                                           mcpLimited ? " (MCP limited)" : "",
+                                          state.altFt, state.gsKts, deltaAlt,
                                           spd.speedKt, spd.distanceNm,
                                           spd.decelLeadNm,
                                           spd.auto250 ? " (auto 250/10000)" : "",
@@ -1354,19 +1364,23 @@ VnavResult Guidance::computeVnav(const AircraftState& state,
                         } else if (spd.valid) {
                             std::snprintf(note, sizeof(note),
                                           "VNAV profile to %s, %.1f NM, %.0f ft%s"
+                                          " | alt=%.0f gs=%.0f delta=%+.0f"
                                           " | speed %d kt @ %.0f NM%s%s",
                                           target.id.empty() ? "WPT" : target.id.c_str(),
                                           target.distanceNm, profileAlt,
                                           mcpLimited ? " (MCP limited)" : "",
+                                          state.altFt, state.gsKts, deltaAlt,
                                           spd.speedKt, spd.distanceNm,
                                           spd.auto250 ? " (auto 250/10000)" : "",
                                           floorText);
                         } else {
                             std::snprintf(note, sizeof(note),
-                                          "VNAV profile to %s, %.1f NM, %.0f ft%s%s",
+                                          "VNAV profile to %s, %.1f NM, %.0f ft%s"
+                                          " | alt=%.0f gs=%.0f delta=%+.0f%s",
                                           target.id.empty() ? "WPT" : target.id.c_str(),
                                           target.distanceNm, profileAlt,
                                           mcpLimited ? " (MCP limited)" : "",
+                                          state.altFt, state.gsKts, deltaAlt,
                                           floorText);
                         }
                         out.note = note;

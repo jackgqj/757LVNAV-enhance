@@ -199,6 +199,7 @@ int main() {
     {
         RouteSnapshot r = MakeRoute();
         r.legs[0] = RouteLeg{0, 0, 1, true};
+        r.legs[0].hold = true;
         AircraftState s = MakeState(0.1, 0.5, 85.0);
         CdiInput cdi;
         cdi.valid = true;
@@ -206,6 +207,10 @@ int main() {
         cdi.distanceNm = 10.0;
         cdi.xtkNm = 0.5;
         LnavResult ln = guidance.computeLnav(s, r, cdi, cfg);
+        CHECK(!ln.active, "hold leg hands lateral control to the FF757");
+        CHECK(ln.source == "HOLD PASS", "hold leg reports HOLD PASS");
+        CHECK(ln.note.find("HOLD at BBB") != std::string::npos,
+              "hold note names the fix");
         CHECK(!ln.active, "complex leg passes through");
     }
 

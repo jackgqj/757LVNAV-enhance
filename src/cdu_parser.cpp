@@ -268,6 +268,48 @@ CduPage ParseCduLegsPage(const std::vector<std::string>& rows, int pageHint) {
             continue;
         }
 
+        // The FF757 prints a hold with the direction on the course line:
+        //   HOLD LEFT
+        //   WX205        270/FL200
+        // (some pages add a standalone "HOLD" continuation line; both forms
+        // must mark the WX205 leg as a hold and never become extra waypoints).
+        const std::string upTop = Upper(TrimCdu(top));
+        if (upTop == "HOLD") {
+            std::string holdIdent = FirstToken(TrimCdu(bottom));
+            while (!holdIdent.empty() &&
+                   (holdIdent[0] == '*' || holdIdent[0] == '>' || holdIdent[0] == '<')) {
+                holdIdent.erase(holdIdent.begin());
+            }
+            if (!holdIdent.empty()) {
+                if (!page.legs.empty() && page.legs.back().id == holdIdent) {
+                    page.legs.back().hold = true;
+                } else {
+                    CduLeg hleg;
+                    hleg.id = holdIdent;
+                    hleg.hold = true;
+                    hleg.page = page.page;
+                    std::string restH = bottom;
+                    const size_t idPos = restH.find(holdIdent);
+                    if (idPos != std::string::npos) {
+                        restH = restH.substr(idPos + holdIdent.size());
+                    }
+                    int hAlt = 0;
+                    int hSpd = 0;
+                    AltConstraint hType = AltAt;
+                    ParseSpeedAltField(restH, hAlt, hSpd, hType);
+                    if (hAlt > 0) {
+                        hleg.altFt = hAlt;
+                        hleg.altConstraint = hType;
+                    }
+                    if (hSpd > 0) hleg.estSpeedKt = hSpd;
+                    page.legs.push_back(hleg);
+                }
+            }
+            ++r;
+            continue;
+        }
+        const bool holdFromTop = upTop.find("HOLD") != std::string::npos;
+
         std::string ident = FirstToken(bottom);
         while (!ident.empty() &&
                (ident[0] == '*' || ident[0] == '>' || ident[0] == '<')) {
@@ -326,7 +368,10 @@ CduPage ParseCduLegsPage(const std::vector<std::string>& rows, int pageHint) {
         }
 
         if (upIdent.find("(HLD)") != std::string::npos ||
-            upBottom.find("HOLD") != std::string::npos) {
+            upBottom.find("HOLD") != std::string::npos ||
+            upBottom.find(" LEFT") != std::string::npos ||
+            upBottom.find(" RIGHT") != std::string::npos ||
+            holdFromTop) {
             leg.hold = true;
         }
 

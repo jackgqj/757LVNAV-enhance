@@ -37,6 +37,7 @@ struct RouteLeg {
     int firstWpt = -1;            // inclusive index into RouteSnapshot::wpts
     int lastWpt = -1;             // inclusive
     bool complex = false;         // multi-point leg (arc, hold, procedure turn)
+    bool hold = false;            // the leg terminates at a hold fix
 
     // RF (constant-radius-to-fix) arc geometry, resolved from the X-Plane
     // CIFP database for the airport nearest the leg.  rfArc is true only when

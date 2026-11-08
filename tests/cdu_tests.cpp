@@ -160,6 +160,35 @@ void TestAltitudeParsing() {
     Check(lvnv::ParseCduSpeed("210") == 210, "speed 210");
 }
 
+// Real FF757 hold format: HOLD LEFT on the course line, the fix below it.
+void TestHoldPage() {
+    std::vector<std::string> lines = {
+        "ACT RTE 1 LEGS       1/2",
+        "HOLD LEFT               ",
+        "WX205        270/FL200  ",
+        " 123     10NM           ",
+        "NEXT        .800/FL300 ",
+        "",
+        "",
+        "",
+        "",
+        "------------------------",
+        "<RTE 2 LEGS    RTE DATA>",
+        "",
+        "",
+        "",
+    };
+    const lvnv::CduPage page = lvnv::ParseCduLegsPage(Rows(lines));
+    Check(page.valid, "hold page is a legs page");
+    Check(page.legs.size() == 2, "hold line is not a duplicate leg");
+    if (page.legs.size() >= 2) {
+        Check(page.legs[0].id == "WX205", "hold leg ident WX205");
+        Check(page.legs[0].hold, "HOLD LEFT marks the leg as a hold");
+        Check(page.legs[1].id == "NEXT", "leg after the hold is NEXT");
+        Check(!page.legs[1].hold, "normal leg is not marked as a hold");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -168,6 +197,7 @@ int main() {
     TestModRoute();
     TestMerge();
     TestAltitudeParsing();
+    TestHoldPage();
     std::cout << g_checks << " checks, " << g_failures << " failures\n";
     return g_failures == 0 ? 0 : 1;
 }

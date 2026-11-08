@@ -1,5 +1,45 @@
 # Changelog
 
+## 1.2.36 — 2026-11-08
+
+Hold detection matches the real FF757 display.
+
+- The FF757 puts the hold direction on the course line (`HOLD LEFT` /
+  `HOLD RIGHT`) with the fix on the next row.  1.2.35 looked for `WX205 LEFT`
+  plus a standalone `HOLD` line, so this format was not detected.  The parser
+  now marks any leg whose course line contains `HOLD` (either direction), and
+  still handles a standalone `HOLD` continuation line without creating a
+  duplicate waypoint.
+- Tests unchanged: guidance 188, CDU 48, CIFP 21.
+
+## 1.2.35 — 2026-11-08
+
+Explicit HOLD handover to the FF757.
+
+- The CDU parser recognises the FF757 hold format: the waypoint line carries
+  `LEFT`/`RIGHT` and a standalone `HOLD` line repeats the fix
+  (`WX205  LEFT` / `HOLD` / `WX205`).  The leg is marked as a hold and the
+  continuation line no longer becomes a bogus duplicate waypoint.
+- `RouteLeg::hold` is carried into the route snapshot.  Guidance reports
+  `HOLD PASS` and `HOLD at <fix>: FF757 owns the hold`, stays inactive, so the
+  flight loop clears `override_nav_heading` and the roll augmentation and the
+  FF757 flies the hold.  A one-shot `LNAV HOLD handover: ...` log line marks
+  the transition.
+- Tests: guidance 188 (was 185; three hold checks), CDU 48 (was 42; six hold
+  format checks), CIFP 21.
+
+## 1.2.34 — 2026-11-08
+
+Adds reqVS audit fields to the VNAV note.
+
+- The VNAV profile note now prints the current altitude, groundspeed and
+  target delta next to the target and distance, e.g.
+  `VNAV profile to FF24, 43.9 NM, 1970 ft | alt=9020 gs=327 delta=-7050`.
+  Every reqVS can now be checked directly in the status window and log
+  (`reqVS ≈ delta / (NM / GS)`), which makes an incorrect profile model
+  obvious instead of having to guess from a screenshot.
+- Tests unchanged: guidance 185, CDU 42, CIFP 21.
+
 ## 1.2.33 — 2026-11-08
 
 Stops the VNAV dive after selecting a low MCP altitude.

@@ -1021,7 +1021,8 @@ void CduRouteReader::buildSnapshot() {
             leg.firstWpt = i - 1;
             leg.lastWpt = i;
         }
-        leg.complex = cache_.legs[static_cast<size_t>(i)].hold;
+        leg.hold = cache_.legs[static_cast<size_t>(i)].hold;
+        leg.complex = leg.hold;
         route_.legs.push_back(leg);
     }
 

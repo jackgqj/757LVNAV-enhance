@@ -1841,6 +1841,9 @@ void UpdateStatusFromResults(const LnavResult& ln, const VnavResult& vn,
                  ? g_routeReader.route().wpts[static_cast<size_t>(ln.activeWpt)].id.c_str()
                  : "-",
              ln.activeLeg, ln.xtkNm, ln.note.c_str());
+        if (ln.source == "HOLD PASS") {
+            Logf("LNAV HOLD handover: %s; nav override released", ln.note.c_str());
+        }
         g_lastLnavSource = ln.source;
     }
     if (g_cockpit2ProbeDone && !g_cockpit2Writable && g_refs.fdPitchCockpit2) {
