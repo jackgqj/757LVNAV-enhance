@@ -28,11 +28,23 @@ struct Config {
     double lnavTurnLeadFactor = 1.0;
     double lnavMaxBankDeg = 25.0;
     // Bank assumed when turning a fly-by corner.  The FF757's LNAV usually
-    // rolls to only ~15 deg at cruise speed, while lnavMaxBankDeg (25) is the
-    // structural/bank-limit value also used by RF arcs.  Using 25 for the
+    // rolls to only ~15-18 deg at cruise speed, while lnavMaxBankDeg (25) is
+    // the structural/bank-limit value also used by RF arcs.  Using 25 for the
     // fly-by radius started the turn ~1.7 NM early at 400 KT: the aircraft cut
-    // inside the new course and then overshot the following corner.
-    double lnavTurnBankDeg = 16.0;
+    // inside the new course and then overshot the following corner.  The value
+    // is scheduled towards lnavTurnBankHighDeg (18) as speed rises, because
+    // the AFDS bank limit decreases with airspeed (AUTO 15-25 deg by TAS).
+    double lnavTurnBankDeg = 17.0;
+    double lnavTurnBankLowKts = 180.0;
+    double lnavTurnBankHighKts = 260.0;
+    // Bank assumed at/above the high-speed threshold.  The AFDS reduces its
+    // bank limit with airspeed; raise this only if the aircraft is observed
+    // holding a steeper bank in LNAV at cruise speed.
+    double lnavTurnBankHighDeg = 18.0;
+    // Hold the previous leg while the FMS has sequenced early (fly-by
+    // sequencing happens up to a minute before the fix at high speed).  When
+    // false, guidance follows the FMS-active leg immediately (old behaviour).
+    bool lnavTurnLatch = true;
     double lnavMaxCourseErrorDeg = 60.0;
     // Degrees of arc completed early before the target course is frozen on the
     // outbound leg, so the autopilot's own capture lag rolls out on course
@@ -75,6 +87,13 @@ struct Config {
     // ~400 KT, so a 0.15 NM offset commands about 1 deg rather than 1.7 deg.
     // Set 0 to disable.
     double lnavL1Factor = 1.6;
+    // Cap on the extra L1 look-ahead correction added to the heading target.
+    // 4 deg was too small after a high-speed turn: with a 5-6 NM overshoot the
+    // L1 term saturated at 4 deg while the base 30 deg intercept could not
+    // close the offset before the next fix.  8 deg keeps the post-turn capture
+    // firm without changing the small-offset behaviour (where the term is far
+    // below the cap).
+    double lnavL1MaxDeg = 8.0;
     // Heading-direct RF command shaping (787 reference): damp = -gain *
     // (actual track - desired track), clamped to +/- max, then converted to a
     // heading with the wind-correction angle.  Suppresses oscillation and
@@ -87,6 +106,24 @@ struct Config {
     double lnavMaxRollCorrectionDeg = 4.0;
     double lnavRollRateLimitDegPerSec = 3.0;
     double lnavRollSmoothingTauSec = 0.10;
+    // Direct bank mode (RNAV1 experiment): write an absolute FD roll target
+    // computed from track error and cross-track instead of only a nav_steer
+    // heading.  The FF757 AP's own bank limit still applies, but this avoids
+    // the heading-direct controller rolling out before the turn is complete.
+    bool lnavBankDirect = true;
+    double lnavBankKTrack = 1.4;
+    double lnavBankKXtk = 0.8;
+    double lnavBankMaxDeg = 25.0;
+    double lnavBankRateDegPerSec = 6.0;
+    // Small deadband/low-pass on the direct-bank command.  Track and
+    // cross-track are instantaneous values, so turbulence otherwise feeds
+    // straight into the bank target.
+    double lnavBankDeadbandDeg = 0.5;
+    double lnavBankDeadbandNm = 0.02;
+    double lnavBankFilterTauSec = 0.10;
+    // Mild track-rate damping: oppose a developing turn rate so a large
+    // capture does not keep 25 deg of bank past the course.
+    double lnavBankTrackRateDamp = 0.5;
 
     // RNP / ANP monitoring (Boeing 777 FMC logic).  RNP is the 95% lateral
     // accuracy requirement of the flight phase; ANP is the 95% estimate of
@@ -137,6 +174,19 @@ struct Config {
     // otherwise the limit is applied to every waypoint below this altitude.
     double vnavHard250BelowFt = 10000.0;
 
+    // Zibo/777-style vertical profile (opt-in).  Instead of chasing the next
+    // altitude constraint with a single chord, build one continuous idle
+    // descent path backwards from the last constraint, with every constraint
+    // becoming a breakpoint and an E/D at the bottom.  Pitch follows the local
+    // path gradient plus a deviation term, which is what the real FMC does in
+    // VNAV PTH.  Legacy target logic is untouched and is used when this is off
+    // or the profile is not usable (climb, no constraints, implausible path).
+    bool vnavPathProfile = false;
+    // Nominal idle descent angle used between constraints.
+    double vnavPathAngleDeg = 3.0;
+    // Extra fpm per foot of path deviation (- above path, + below path).
+    double vnavPathDevGain = 0.6;
+
     // Route cache
     // 0 disables the periodic timer; the default trigger is a visible LEGS
     // page content change (once per change).
@@ -147,6 +197,12 @@ struct Config {
     // EXEC-only scanning: wait for the CDU to show ACT RTE (MOD -> ACT) and
     // scan once.  Default false: scan once whenever the page content changes.
     bool cduScanOnExecOnly = false;
+
+    // CIFP departure procedure overlay.  When enabled, the active SID is
+    // detected by matching the route's first fixes against the airport's CIFP
+    // SIDs; the procedure prefix (including RF arcs) is merged ahead of the
+    // FMS route at the last common fix.  Disable to use the raw FMS/CDU route.
+    bool cifpProcedureRoute = true;
 
     // FF757 mode codes.  These are undocumented enum values; the defaults
     // match the order of the labels in the FF757 avionics binary.

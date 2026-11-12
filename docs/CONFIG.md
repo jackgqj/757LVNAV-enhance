@@ -27,7 +27,11 @@ lnav_direct_intercept_deg=45
 lnav_xtk_blend_nm=2.5
 lnav_turn_lead_factor=1.0
 lnav_max_bank_deg=25
-lnav_turn_bank_deg=16
+lnav_turn_bank_deg=17
+lnav_turn_bank_low_kt=180
+lnav_turn_bank_high_kt=260
+lnav_turn_bank_high_deg=18
+lnav_turn_latch=1
 lnav_max_course_error_deg=60
 lnav_rollout_lead_deg=4.0
 lnav_rf_enabled=1
@@ -36,6 +40,7 @@ lnav_rf_nav_override=1
 lnav_heading_direct=1
 lnav_force_cdi=0
 lnav_l1_factor=1.6
+lnav_l1_max_deg=8
 lnav_track_damp_gain=0.35
 lnav_track_damp_max_deg=10
 rnp_enabled=1
@@ -43,25 +48,41 @@ rnp_nm=0
 lnav_min_speed_kts=60
 lnav_min_distance_nm=0.05
 lnav_roll_gain=0.25
-lnav_max_roll_correction_deg=6
-lnav_roll_rate_limit_deg_s=5
+lnav_max_roll_correction_deg=4
+lnav_roll_rate_limit_deg_s=3
 lnav_roll_smoothing_tau_s=0.1
+lnav_bank_direct=1
+lnav_bank_k_track=1.4
+lnav_bank_k_xtk=0.8
+lnav_bank_max_deg=25
+lnav_bank_rate_deg_s=6
+lnav_bank_deadband_deg=0.5
+lnav_bank_deadband_nm=0.02
+lnav_bank_filter_tau_s=0.10
+lnav_bank_track_rate_damp=0.5
 
-vnav_vs_gain=0.8
+vnav_vs_gain=1.2
 vnav_accel_gain=0.0015
 vnav_max_correction_deg=2.5
 vnav_rate_limit_deg_s=3
-vnav_smoothing_tau_s=0.12
+vnav_smoothing_tau_s=0.1
 vnav_max_vs_fpm=3000
 vnav_min_distance_nm=0.3
 vnav_max_alt_delta_ft=50000
 vnav_augment_speed_mode=0
 vnav_respect_selected_alt=1
 vnav_priority=1
+vnav_speed_limits_enabled=1
+vnav_speed_decel_factor_nm_per_10kt=1
+vnav_hard_250_below_ft=10000
+vnav_path_profile=0
+vnav_path_angle_deg=3
+vnav_path_dev_gain=0.6
 
 cdu_rescan_interval_s=0
 cdu_periodic_rescan=0
 cdu_scan_on_exec_only=0
+cifp_procedure_route=1
 
 lnav_roll_mode=2
 vnav_pitch_mode_a=0
@@ -86,15 +107,20 @@ debug=0
 | `lnav_xtk_blend_nm` | Cross-track at which the small-offset homing hands over to the constant 30° capture | 2.5 nm default. Below it the aircraft flies at the fix (angle = atan(offset/distance), decaying as the offset closes); above it the constant capture applies, blended over ±0.4× this value. Raise it if long legs still show an early swing |
 | `lnav_turn_lead_factor` | How early the turn starts relative to the tangent point | 1.0 = tangent (no corner cut, no rollout overshoot). Increase only if the aircraft still overshoots fixes; decrease below 1.0 makes it turn earlier |
 | `lnav_max_bank_deg` | Bank used to compute turn radius | Match your normal LNAV bank limit (25° default) |
-| `lnav_turn_bank_deg` | Bank assumed for fly-by corner anticipation only | **16° default**. The FF757's LNAV usually rolls to about 15° at cruise speed while `lnav_max_bank_deg` (25°) remains the bank-limit value used by RF arcs. Using 25° for the fly-by radius started the turn ~1.7 NM early at 400 KT, so the aircraft cut inside the new course and then overshot the following corner. Raise toward 20–25 only if your aircraft really banks that steeply in LNAV |
+| `lnav_turn_bank_deg` | Bank assumed for fly-by corner anticipation only | **17° default**. The FF757's LNAV usually rolls to about 15–18° at cruise speed while `lnav_max_bank_deg` (25°) remains the bank-limit value used by RF arcs. Using 25° for the fly-by radius started the turn ~1.7 NM early at 400 KT, so the aircraft cut inside the new course and then overshot the following corner. The value is scheduled towards `lnav_turn_bank_high_deg` as speed rises |
+| `lnav_turn_bank_low_kt` | Groundspeed at/below which `lnav_turn_bank_deg` is used | 180 kt default |
+| `lnav_turn_bank_high_kt` | Groundspeed at/above which `lnav_turn_bank_high_deg` is used | 260 kt default |
+| `lnav_turn_bank_high_deg` | Bank assumed at high speed | **18° default**. The AFDS reduces its bank limit with airspeed (AUTO 15–25° by TAS). Raise only if your aircraft is observed holding a steeper LNAV bank at cruise speed; a value above the real limit makes the fly-by lead too short and the turn overshoot |
+| `lnav_turn_latch` | Hold the previous leg while the FMS has sequenced early | **1 default**. The FF757 sequences to the next leg up to a minute before the fix at high speed. Following the new leg at once made the plugin start the turn many miles early and cut the corner. The latch keeps the previous leg's fly-by arc in charge until the shared fix is passed; the latch is sticky across a second early sequence. **RF legs bypass the latch entirely**: no RF leg is latched, and a pre-RF latch is dropped when an RF leg is between it and the active leg. Set 0 to follow the FMS-active leg immediately (old behaviour) |
 | `lnav_max_course_error_deg` | Hard course-error clamp | 60° default; prevents extreme commands |
 | `lnav_rollout_lead_deg` | Degrees of arc completed early before the target freezes on the outbound course | **4.0° default**. If roll-out still overshoots, raise it; if the aircraft straightens visibly early and drifts outside, lower it |
-| `lnav_rf_enabled` | RF (constant-radius-to-fix) leg tracking from the CIFP procedure database | 1 default. RF legs (e.g. KSEA RNAV RNP approaches) are flown as true arcs instead of the FF757's polygonal approximation. Set 0 to pass RF legs through like any other complex leg |
+| `lnav_rf_enabled` | RF (constant-radius-to-fix) leg tracking from the X-Plane CIFP database | 1 default. RF legs (e.g. ZULS RNAV RNP departures) are flown as true arcs instead of the FF757's polygonal approximation. Coordinates come from CIFP + the nav database; the FF757 `Proc` file is not used for RF. Set 0 to pass RF legs through like any other complex leg |
 | `lnav_rf_fd_roll` | Small FD roll correction on RF arcs only | **1 default**. The FF757 often keeps `override_nav_heading=0`, so the nav target cannot hold the radius; this adds up to ±4° of roll while an RF arc is tracked. No other leg is affected (global `lnav_fd_roll` stays 0). Set 0 to leave roll fully to the model |
 | `lnav_rf_nav_override` | Heading-direct RF guidance: hold `sim/operation/override/override_nav_heading=1` on RF arcs | **1 default**. The nav controller flies the plugin's `nav_steer_deg_mag`, converted from desired track to heading with the wind-correction angle (`hdg - trk`) plus track damping - the same command shape as the 787 reference script. The FF757 clears the flag every frame, so the plugin re-asserts it each frame (normal, not a failure). FD roll is skipped while this is live, so only one lateral controller commands roll. Set 0 to use the `±4°` FD roll nudge instead (when `lnav_heading_direct=0`) |
 | `lnav_heading_direct` | Heading-direct guidance on **all** LNAV legs | **1 default**. Every active LNAV leg holds `override_nav_heading=1` and writes `nav_steer_deg_mag` as a heading (track + WCA + damping), so straight legs are actively flown instead of only monitored; FD roll is skipped while live. Released when LNAV drops out, AP disengages, the sim pauses or the plugin is disabled. Set 0 to hand straight legs back to the FF757 and keep the override RF-only |
 | `lnav_force_cdi` | Force the GPS CDI as the LNAV source | 0 default. When 1 the parsed route is ignored and the plugin tracks the FF757 GPS CDI (same math as the automatic fallback). The status window shows `src=GPS CDI` and the note `GPS CDI source (forced)`. Toggle in flight with the menu item **LNAV source: GPS CDI** or the command `757lvnv/toggle_cdi_source` |
-| `lnav_l1_factor` | L1 look-ahead cross-track term on straight legs | 1.6 default. Adds the difference between `atan(xtk / L1)` (L1 = factor × turn radius, 0.5–8 NM) and the base `atan(xtk / distance-to-fix)`, clamped to ±4°, so a small steady offset (0.15 NM on a 28 NM leg) closes in under a minute. At 1.6 the L1 cap is reached above ~400 KT, giving about 1° for a 0.15 NM offset; lower values correct harder, 0 disables. RF arcs are excluded. Large offsets still use the 30° Boeing capture |
+| `lnav_l1_factor` | L1 look-ahead cross-track term on straight legs | 1.6 default. Adds the difference between `atan(xtk / L1)` (L1 = factor × turn radius, 0.5–8 NM) and the base `atan(xtk / distance-to-fix)`, clamped to ±`lnav_l1_max_deg`, so a small steady offset (0.15 NM on a 28 NM leg) closes in under a minute. At 1.6 the L1 cap is reached above ~400 KT, giving about 1° for a 0.15 NM offset; lower values correct harder, 0 disables. RF arcs are excluded. Large offsets still use the 30° Boeing capture |
+| `lnav_l1_max_deg` | Cap on the extra L1 correction | **8° default**. 4° saturated after a high-speed turn with a 5–6 NM overshoot while the 30° base intercept could not close it before the next fix; 8° gives a firmer post-turn capture without affecting small offsets (where the term is far below the cap). Lower it if straight legs S-turn |
 | `lnav_track_damp_gain` | Track-error damping gain in heading-direct RF mode | 0.35 default. `damp = -gain × (actual track - desired track)`; damps the overshoot/oscillation of the arc capture |
 | `lnav_track_damp_max_deg` | Damping limit | 10° default. Raise only if the arc capture still oscillates; too high makes the turn sluggish |
 | `rnp_enabled` | RNP/ANP monitoring (777-style) | 1 default. The status window shows RNP/ANP and raises `NAV UNABLE RNP` when the estimate exceeds the requirement |
@@ -106,16 +132,25 @@ debug=0
 | `lnav_max_roll_correction_deg` | Hard bank-correction limit | 4° default; do not exceed 6° without flight testing |
 | `lnav_roll_rate_limit_deg_s` | FD roll correction slew rate | 3°/s default |
 | `lnav_roll_smoothing_tau_s` | FD roll baseline low-pass | 0.10 s default |
+| `lnav_bank_direct` | Direct FD bank command (RNAV1) | **1 default**. Writes an absolute FD roll target from track error + cross-track instead of a nav_steer heading. This keeps the bank up through a turn instead of rolling out early. Fly-by/RF feed-forward is used only when its sign agrees with the current target-course error and course trend (`ff=1` in `LNAV servo`; `ff=0` means it was rejected). Requires the legacy FD roll dataref to be writable; otherwise it falls back to heading-direct. Toggle with **LNAV bank direct (RNAV1)** |
+| `lnav_bank_k_track` | Bank per degree of track error | 1.4 default. Raise for a more aggressive turn (25° cap), lower if the aircraft S-turns |
+| `lnav_bank_k_xtk` | Bank per degree of cross-track look-ahead angle | 0.8 default. Look-ahead is `0.5 × distance` clamped 1.5–5 NM |
+| `lnav_bank_max_deg` | Direct-bank command limit | 25° default; the FF757 AP's own bank limiter still applies |
+| `lnav_bank_rate_deg_s` | Direct-bank command slew rate | 6°/s default. Raise if the FD roll target lags the turn (the AP's own roll rate is the final limit); lower if the roll is too abrupt |
+| `lnav_bank_deadband_deg` | Track-error deadband | 0.5° default; below this, and within the cross-track deadband, the bank target is zero to avoid chasing turbulence |
+| `lnav_bank_deadband_nm` | Cross-track deadband | 0.02 NM default |
+| `lnav_bank_filter_tau_s` | Direct-bank command low-pass | 0.10 s default; raise to 0.2–0.3 for smoother tracking in continuous turbulence, lower to 0.05 for crisper response |
+| `lnav_bank_track_rate_damp` | Track-rate damping | 0.5 default (degrees of bank per deg/s of track rate, capped at 6°). Trims bank as the turn rate develops so a large capture does not hold 25° past the course; raise to 1.2–1.5 for more damping, 0 to disable |
 
 ### VNAV
 
 | Key | Meaning | Tuning |
 | --- | --- | --- |
-| `vnav_vs_gain` | Pitch correction per 1000 fpm of VS error | 0.8 default; lower to 0.5 for gentler path capture |
+| `vnav_vs_gain` | Pitch correction per 1000 fpm of VS error | 1.2 default; lower to 0.8–1.0 for gentler path capture |
 | `vnav_accel_gain` | Vertical-acceleration damping | 0.0015 default; increase to 0.003 if VNAV porpoises |
 | `vnav_max_correction_deg` | Hard pitch correction limit | 2.5° default; do not exceed 4–5° without flight testing |
 | `vnav_rate_limit_deg_s` | Max correction slew rate | 3°/s default |
-| `vnav_smoothing_tau_s` | Baseline FD pitch low-pass time constant | 0.12 s; increase for smoother but laggier response |
+| `vnav_smoothing_tau_s` | Baseline FD pitch low-pass time constant | 0.1 s; increase for smoother but laggier response |
 | `vnav_max_vs_fpm` | Required-VS clamp | 3000 fpm default |
 | `vnav_min_distance_nm` | Do not use path data inside this distance | 0.3 nm default |
 | `vnav_max_alt_delta_ft` | Hard cap for implausible altitude constraints | 50000 ft default; also scales with distance to the fix (8000 ft minimum, 1200 ft/nm) |
@@ -125,12 +160,16 @@ debug=0
 | `vnav_speed_limits_enabled` | Speed-limit handling (DECEL points + FAR 250/10000) | **1 default**. Set 0 to disable both |
 | `vnav_speed_decel_factor_nm_per_10kt` | Deceleration lead: NM per 10 KT of slowdown | **1.0 default** (matches Boeing 777). A heavier aircraft can use 1.1–1.2; 0 disables the lead (forces the speed to be met exactly at the fix) |
 | `vnav_hard_250_below_ft` | FAR 250 KT ceiling altitude | **10000 ft default**. 0 disables the auto-enforcement |
+| `vnav_path_profile` | Zibo/777-style vertical profile | **0 default (opt-in)**. Builds one continuous idle descent path backwards from the last altitude constraint (E/D), with every constraint as a breakpoint; pitch follows the local gradient plus path deviation. When 0, or when the route has no usable descent (climb, no constraints, implausible gradient), the legacy next-altitude target logic is used unchanged |
+| `vnav_path_angle_deg` | Nominal idle path angle between constraints | **3.0° default** (≈318 ft/NM). Range 1–6° |
+| `vnav_path_dev_gain` | Extra fpm per foot of path deviation | **0.6 default**. Positive deviation (above path) adds descent; negative (below) reduces it. Range 0–3 |
 
 ### Route cache
 
 | Key | Meaning | Tuning |
 | --- | --- | --- |
 | `cdu_scan_on_exec_only` | Scan only an executed route | 0 default: scan once whenever the visible LEGS page content changes. Set to 1 to wait for `ACT RTE` (MOD → ACT) and skip MOD-page content changes |
+| `cifp_procedure_route` | Merge the detected CIFP departure into the FMS route | **1 default**. The active SID is detected by matching the route's first fixes against the nearest airport's CIFP SIDs (60 NM); a route starting mid-procedure may match with the last two SID fixes. The procedure/RF/resolved-coordinate prefix joins the FMS route at the first common fix. Runway thresholds are not in CIFP, so the first departure leg may start at the first resolved fix. Set 0 to use the raw CDU/rteData route |
 | `cdu_periodic_rescan` | Enable the periodic rescan timer | 0 default. The default trigger is page-content changes only; set to 1 with a non-zero interval to add periodic rescans |
 | `cdu_rescan_interval_s` | Periodic rescan interval | Only used when `cdu_periodic_rescan=1`. 0 default; set 5–600 |
 

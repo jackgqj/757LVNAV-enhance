@@ -1,8 +1,13 @@
 #include "route_reader.h"
 
+#include "log.h"
+
+#include "XPLMUtilities.h"
+
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 
@@ -120,7 +125,7 @@ int parseAltitudeString(const std::string& input, AltConstraint& altType) {
 
 } // namespace
 
-RouteReader::RouteReader() = default;
+RouteReader::RouteReader() : procBuilder_(&cifpProc_) {}
 
 XPLMDataRef RouteReader::find(const std::string& suffix) const {
     auto it = refs_.find(suffix);
@@ -144,6 +149,15 @@ void RouteReader::bind() {
     report_.clear();
     bound_ = true;
 
+    if (!cifpProcRootSet_) {
+        char root[512] = {0};
+        XPLMGetSystemPath(root);
+        if (root[0]) {
+            cifpProc_.setRootPath(root);
+            cifpProcRootSet_ = true;
+        }
+    }
+
     for (const char* suffix : kKnownSuffixes) {
         XPLMDataRef r = find(suffix);
         if (r) {
@@ -158,6 +172,16 @@ void RouteReader::bind() {
 
 void RouteReader::reset() {
     route_.clear();
+    baseRoute_.clear();
+    mergedRoute_.clear();
+    baseValid_ = false;
+    hasMergedRoute_ = false;
+    cifpAssisted_ = false;
+    cifpApplied_ = false;
+    cifpChecked_ = false;
+    cifpRouteSignature_.clear();
+    cifpNote_.clear();
+    lastCifpAttempt_ = -1000.0;
     lastFullRefresh_ = -1000.0;
     lastBindAttempt_ = -1000.0;
     lastActiveIdx_ = -2;
@@ -346,6 +370,7 @@ void RouteReader::refresh(double elapsedSeconds, bool force) {
             route_ = cduRoute;
             report_ = "CDU LEGS";
             lastError_ = cdu_.lastError();
+            captureBaseRoute();
         } else if (!route_.valid || !route_.sourceRoute) {
             route_.clear();
             lastError_ = cdu_.lastError();
@@ -365,6 +390,144 @@ void RouteReader::refresh(double elapsedSeconds, bool force) {
     lastFullRefresh_ = elapsedSeconds;
     lastActiveIdx_ = activeNow;
     rebuild();
+    captureBaseRoute();
+}
+
+void RouteReader::captureBaseRoute() {
+    if (!route_.valid) {
+        baseRoute_.clear();
+        baseValid_ = false;
+        hasMergedRoute_ = false;
+        cifpAssisted_ = false;
+        cifpApplied_ = false;
+        cifpChecked_ = false;
+        cifpRouteSignature_.clear();
+        cifpNote_.clear();
+        return;
+    }
+    baseRoute_ = route_;
+    baseValid_ = true;
+    const std::string sig = routeSignature(baseRoute_);
+    if (cifpChecked_ && sig == cifpRouteSignature_ && hasMergedRoute_) {
+        route_ = mergedRoute_;
+        cifpAssisted_ = true;
+        cifpApplied_ = true;
+        return;
+    }
+    hasMergedRoute_ = false;
+    cifpAssisted_ = false;
+    cifpApplied_ = false;
+    cifpChecked_ = false;
+    cifpRouteSignature_.clear();
+    cifpNote_.clear();
+}
+
+void RouteReader::restoreBaseRoute() {
+    if (baseValid_) route_ = baseRoute_;
+    cifpAssisted_ = false;
+    cifpApplied_ = false;
+    report_ = hasRouteDatarefs() ? "rteData" : "CDU LEGS";
+}
+
+std::string RouteReader::routeSignature(const RouteSnapshot& route) const {
+    std::string s;
+    s.reserve(128);
+    s += std::to_string(route.wptCount);
+    s += '|';
+    s += std::to_string(route.activeWpt);
+    s += '|';
+    s += std::to_string(route.legCount);
+    const int n = std::min(12, static_cast<int>(route.wpts.size()));
+    for (int i = 0; i < n; ++i) {
+        s += '|';
+        s += route.wpts[static_cast<size_t>(i)].id;
+    }
+    s += '|';
+    s += route.activeId;
+    return s;
+}
+
+void RouteReader::applyCifpProcedure(double lat, double lon, bool enabled,
+                                     double elapsedSeconds) {
+    if (!enabled) {
+        if (cifpApplied_) restoreBaseRoute();
+        cifpProcedureEnabled_ = false;
+        return;
+    }
+    if (!cifpProcedureEnabled_) {
+        cifpProcedureEnabled_ = true;
+        cifpChecked_ = false;
+    }
+    if (!baseValid_ || !baseRoute_.valid) return;
+    // Only assist the departure segment.  A route that has already sequenced
+    // several fixes should not be re-detected against a SID at the nearby
+    // airport.
+    if (baseRoute_.activeWpt > 6) return;
+
+    const std::string sig = routeSignature(baseRoute_);
+    if (cifpChecked_ && sig == cifpRouteSignature_ &&
+        elapsedSeconds - lastCifpAttempt_ < 5.0) {
+        return;
+    }
+    cifpRouteSignature_ = sig;
+    cifpChecked_ = true;
+    lastCifpAttempt_ = elapsedSeconds;
+
+    if (!cifpProcRootSet_) return;
+
+    ProcedureSelection selection;
+    const ProcedureRouteOptions options;
+    if (!procBuilder_.detect(baseRoute_, lat, lon, selection, options)) {
+        if (cifpApplied_) restoreBaseRoute();
+        hasMergedRoute_ = false;
+        cifpNote_ = "no CIFP departure match";
+        if (lastCifpLog_ != cifpNote_) {
+            Logf("CIFP procedure: %s", cifpNote_.c_str());
+            lastCifpLog_ = cifpNote_;
+        }
+        return;
+    }
+
+    RouteSnapshot procRoute;
+    ResolveStats stats;
+    if (!procBuilder_.build(selection, procRoute, &stats)) {
+        if (cifpApplied_) restoreBaseRoute();
+        hasMergedRoute_ = false;
+        cifpNote_ = "CIFP procedure build failed";
+        if (lastCifpLog_ != cifpNote_) {
+            Logf("CIFP procedure: %s", cifpNote_.c_str());
+            lastCifpLog_ = cifpNote_;
+        }
+        return;
+    }
+
+    RouteSnapshot merged;
+    if (!ProcedureRouteBuilder::merge(baseRoute_, procRoute, merged)) {
+        if (cifpApplied_) restoreBaseRoute();
+        hasMergedRoute_ = false;
+        cifpNote_ = "CIFP route has no common fix with the FMS route";
+        if (lastCifpLog_ != cifpNote_) {
+            Logf("CIFP procedure: %s", cifpNote_.c_str());
+            lastCifpLog_ = cifpNote_;
+        }
+        return;
+    }
+
+    route_ = merged;
+    mergedRoute_ = merged;
+    hasMergedRoute_ = true;
+    cifpAssisted_ = true;
+    cifpApplied_ = true;
+    report_ = (hasRouteDatarefs() ? "rteData" : "CDU LEGS") + std::string(" + CIFP");
+    char note[160];
+    std::snprintf(note, sizeof(note), "%s %s, %d/%zu fixes, %d RF",
+                  selection.ident.c_str(), selection.transition.c_str(),
+                  stats.resolved, procRoute.wpts.size(), stats.rfCenters);
+    cifpNote_ = note;
+    if (lastCifpLog_ != cifpNote_) {
+        Logf("CIFP procedure: %s", cifpNote_.c_str());
+        lastCifpLog_ = cifpNote_;
+    }
 }
 
 void RouteReader::rebuild() {

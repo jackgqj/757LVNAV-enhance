@@ -1,6 +1,8 @@
 #pragma once
 
 #include "cdu_reader.h"
+#include "procedure_parser.h"
+#include "procedure_route.h"
 #include "route_model.h"
 
 #include <map>
@@ -21,6 +23,15 @@ public:
     // Reads the FF757 route datarefs.  The full route is refreshed at a low
     // rate; activeWptIndex() can be polled every frame.
     void refresh(double elapsedSeconds, bool force = false);
+
+    // Overlay the detected CIFP departure (procedure prefix + RF geometry) on
+    // the FMS/CDU route.  Called after the aircraft state is read; the base
+    // route is kept so a disabled/failed overlay can restore it.
+    void applyCifpProcedure(double lat, double lon, bool enabled,
+                            double elapsedSeconds);
+    void setCifpProcedureEnabled(bool enabled) { cifpProcedureEnabled_ = enabled; }
+    bool cifpProcedureAssisted() const { return cifpAssisted_; }
+    const std::string& cifpProcedureNote() const { return cifpNote_; }
 
     int activeWptIndex() const;
     const RouteSnapshot& route() const { return route_; }
@@ -54,10 +65,28 @@ private:
     bool parseAltitudes(std::vector<int>& starts, std::vector<int>& lens,
                         const std::vector<char>& buffer, bool altAsFloatArray,
                         const std::vector<float>& altFloats);
+    void captureBaseRoute();
+    void restoreBaseRoute();
+    std::string routeSignature(const RouteSnapshot& route) const;
 
     mutable std::map<std::string, XPLMDataRef> refs_;
     CduRouteReader cdu_;
     RouteSnapshot route_;
+    RouteSnapshot baseRoute_;
+    RouteSnapshot mergedRoute_;
+    bool baseValid_ = false;
+    bool hasMergedRoute_ = false;
+    CifpProcedureDatabase cifpProc_;
+    ProcedureRouteBuilder procBuilder_{&cifpProc_};
+    bool cifpProcRootSet_ = false;
+    bool cifpProcedureEnabled_ = true;
+    bool cifpAssisted_ = false;
+    bool cifpApplied_ = false;
+    bool cifpChecked_ = false;
+    std::string cifpRouteSignature_;
+    std::string cifpNote_;
+    std::string lastCifpLog_;
+    double lastCifpAttempt_ = -1000.0;
     std::string report_;
     std::string lastError_;
     double lastFullRefresh_ = -1000.0;

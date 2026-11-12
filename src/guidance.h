@@ -1,11 +1,37 @@
+// ===================================================================
+// LNAV MODULE — AI WARNING
+// 致AI的一个警告：如果用户给你的指令是搞VNAV，请不要动LNAV。
+// If the user's instruction is about VNAV, do not modify LNAV.
+// ===================================================================
+
 #pragma once
 
+#include <algorithm>
 #include <string>
 
 #include "config.h"
+#include "geo.h"
 #include "route_model.h"
 
 namespace lvnv {
+
+// Bank used to predict a fly-by turn radius.  The FF757's AFDS limits bank as
+// speed rises (the cockpit BANK LIMIT selector documents AUTO = 15..25 deg by
+// true airspeed), so the radius must not be computed with one fixed bank: a
+// low assumed bank at high speed predicts a radius that is too large, which
+// starts the turn early and cuts the corner.  Schedule it from
+// lnavTurnBankDeg at/below lnavTurnBankLowKts to lnavTurnBankHighDeg (18 by
+// default) at/above lnavTurnBankHighKts.
+constexpr double kFlyByBankHighDeg = 18.0;
+
+inline double flyByBankDeg(const Config& cfg, double gsKts) {
+    const double lo = std::min(cfg.lnavTurnBankLowKts, cfg.lnavTurnBankHighKts);
+    const double hi = std::max(cfg.lnavTurnBankLowKts, cfg.lnavTurnBankHighKts);
+    if (hi - lo < 1.0) return cfg.lnavTurnBankHighDeg;
+    const double t = clampd((gsKts - lo) / (hi - lo), 0.0, 1.0);
+    return cfg.lnavTurnBankDeg +
+           (cfg.lnavTurnBankHighDeg - cfg.lnavTurnBankDeg) * t;
+}
 
 struct AircraftState {
     bool valid = false;
@@ -53,6 +79,16 @@ struct LnavResult {
     double correctionDeg = 0.0;
     double rollCorrectionDeg = 0.0;
     double turnProgress = 0.0;
+    // Feed-forward bank for the planned turn (RF or fly-by arc).  The direct
+    // bank mode uses this so the aircraft rolls to the arc's bank immediately
+    // instead of waiting for track error to build up.
+    double turnBankDeg = 0.0;
+    bool turnBankValid = false;
+    // Fly-by diagnostics (0 / -1 when not in a turn-anticipation block).
+    double turnRemainNm = 0.0;
+    double turnTangentNm = 0.0;
+    double turnArcDeg = 0.0;
+    int turnZone = 0;
     // RNP / ANP monitoring (777 FMC style).  rnpNm = 0 when monitoring is off.
     double rnpNm = 0.0;              // required navigation performance in effect
     double anpNm = 0.0;              // actual navigation performance estimate
@@ -142,6 +178,28 @@ private:
     double rfLastRadialDeg_ = 0.0;
     double rfProgressDeg_ = 0.0;
 
+    // LNAV turn-transition state.  The FF757 FMS sequences to the next leg
+    // several miles before the fix at high speed.  Following that immediately
+    // makes the plugin chase the new leg's line with a 30 deg intercept,
+    // starting the turn far too early.  The compromise latch keeps steering
+    // the previous leg until the aircraft has passed the shared fix (the
+    // projection onto the inbound leg passes the fix while the fly-by arc is
+    // still being flown), then hands over to the FMS-active leg.
+    //
+    // The intercept magnitude in use at the sequencing frame is carried for a
+    // few seconds and decayed linearly; it is tied to one leg change only so a
+    // later leg cannot inherit a stale turn command.
+    int lastGuideLeg_ = -1;
+    double lastInterceptDeg_ = 0.0;
+    double cornerCarryDeg_ = 0.0;
+    int cornerCarryFrames_ = 0;
+    // Sticky leg latch.  The FMS can sequence two or more legs within one
+    // high-speed turn (HC306 -> HC606 -> SUPAR in the live departure), so a
+    // latch that is recomputed from route.activeLeg every frame would abandon
+    // the turn when the second sequence arrives.  Hold this leg until the
+    // aircraft passes its end fix.
+    int latchedLeg_ = -1;
+
     // VNAV pitch-authority state.  vnavPathHeld_ keeps the plugin on pitch
     // after a correction starts, with hysteresis, until both the VS error and
     // the integrated path deviation are small.  vnavPathErrorFt_ integrates
@@ -150,6 +208,11 @@ private:
     bool vnavPathHeld_ = false;
     double vnavPathErrorFt_ = 0.0;
     int vnavTargetIndex_ = -1;
+    // Last E/D waypoint of the profile-mode path.  Kept separate from
+    // vnavTargetIndex_ because the legacy target is the first differing
+    // altitude while the profile is anchored on the last one; sharing the
+    // index would reset the pitch latch on every frame.
+    int vnavProfileEndWpt_ = -1;
 
     // Shared RNP/ANP monitor: phase RNP selection, ANP low-pass and the
     // hysteresis alert.  absLateralErrNm is |cross-track| on straight legs or

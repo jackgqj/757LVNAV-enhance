@@ -1,5 +1,138 @@
 # Changelog
 
+## 1.2.36+vnav-profile+lnav-turn+cifp-nav+rnav1-bank — 2026-11-12
+
+RNAV1 direct-bank lateral mode.  Bilingual release notes:
+[`RELEASE_NOTES.md`](RELEASE_NOTES.md).
+
+- Added `lnav_bank_direct` (default 1): instead of only writing a `nav_steer`
+  heading, the plugin writes an absolute FD roll target computed from track
+  error and cross-track (`lnav_bank_k_track`, `lnav_bank_k_xtk`,
+  `lnav_bank_max_deg`, default 25° cap).  This holds the bank through a turn
+  instead of letting the heading-direct controller roll out early.
+- The direct-bank path sets `override_flightdir_roll=1`, writes the legacy FD
+  roll and (when writable) the cockpit2 FD roll, and releases the
+  `override_nav_heading` controller so only one lateral controller is active.
+  If the FD roll dataref is not writable it falls back to heading-direct.
+- New menu item **LNAV bank direct (RNAV1)** and status line `BankD=`.
+- The fly-by corner and RF arc publish the bank their planned radius requires
+  (`LnavResult::turnBankDeg`); direct bank uses it as feed-forward plus half of
+  the track-error correction.  This removes the slow roll-in where the bank
+  only built up after the aircraft crossed the fix.
+- Direct-bank command slew is now `lnav_bank_rate_deg_s` (6°/s default,
+  separate from the FD-roll bridge rate), so a 25° target is reached in about
+  four seconds instead of being limited by the 3°/s baseline path.
+- Direct bank on a planned fly-by corner now uses the corner feed-forward bank
+  plus only a small track-error correction.  The cross-track term was
+  producing a 15-20 deg opposing command at short look-ahead and rolling the
+  wings back while only halfway through the turn; it is now applied only
+  outside the fly-by arc.
+- Direct bank has a small track/cross-track deadband and a 0.10 s command
+  filter (`lnav_bank_deadband_deg`, `lnav_bank_deadband_nm`,
+  `lnav_bank_filter_tau_s`) so instantaneous track jitter in turbulence is not
+  fed straight into the FD roll target.
+- Added mild track-rate damping (`lnav_bank_track_rate_damp=0.5`, capped ±6°)
+  so a large direct-bank capture does not hold 25° past the course and then
+  reverse.  The filter default is 0.10 s.
+- RF legs now bypass the sticky turn latch entirely: no latch onto an RF leg
+  and no carrying a pre-RF leg across an RF leg.  Ordinary LNAV leg latching is
+  unchanged.  RF centre, radius, turn and sweep geometry are unchanged.
+- RF feed-forward direction check now has a same-frame test: if
+  `sign(turnBankDeg)` opposes the current target-course error, the
+  feed-forward is ignored for that frame.  The course-trend check remains as a
+  second guard.  This fixes the IDBON heading lock where a left RF
+  feed-forward held the wings while the target course was to the right and the
+  trend state had just reset.  RF centre/radius/turn geometry is unchanged.
+- Tests: bank 8, procedure 25, procedure-route 16, guidance 223, CDU 48,
+  CIFP 21.
+
+## 1.2.36+vnav-profile+lnav-turn+cifp-nav — 2026-11-12
+
+CIFP-only departure procedure integration.
+
+- Added `CifpProcedureDatabase` and `ProcedureRouteBuilder`: parse the airport
+  ARINC 424 SID sequence from `Custom Data/CIFP/<ICAO>.dat`, resolve every fix
+  and RF centre through the nav database, and convert it to a `RouteSnapshot`
+  with RF geometry.
+- `RouteReader` detects the active SID from the route's first idents at the
+  nearest airport (60 NM), merges the procedure prefix ahead of the FMS/CDU
+  route at the last common fix, and keeps the FMS route after the join.  The
+  merged route is cached by route signature.
+- New `cifp_procedure_route` config key (default 1) and menu item
+  **CIFP departure route**.  The status window shows the procedure ident,
+  transition, resolved fix count and RF centre count.
+- The plugin RF lookup now uses X-Plane CIFP only; the FF757 GNS430 `Proc`
+  parser remains as legacy test code but is no longer a procedure source.
+- Tests: procedure 25, procedure-route 16, guidance 222, CDU 48, CIFP 21.
+
+## 1.2.36+vnav-profile+lnav-turn — 2026-11-10
+
+RNAV-departure LNAV turn fixes (bank-aware fly-by path).
+
+- The FF757 FMS sequences to the next waypoint at its own fly-by point, up to
+  a minute before the fix at high speed (live ZSHC SUPAR8D: HC306 -> HC606
+  9.4 NM early at 285 KT, SUPAR -> OKTUG 12.2 NM early at 461 KT).  Following
+  the new active leg immediately made LNAV chase its line with a 30 deg
+  intercept, start the turn many miles early and cut the corner.
+- A compromise leg latch now keeps flying the previous leg until the
+  aircraft has passed the shared fix, so that leg's fly-by arc owns the
+  corner.  The latch is sticky: a second FMS sequence inside the same
+  high-speed turn no longer drops the corner halfway.  `lnav_turn_latch=0`
+  restores the old follow-the-FMS behaviour.
+- The fly-by arc is closed-loop: a radial error term
+  `1.5 * asin(distance-off-circle / radius)` (clamped +-25 deg) adds turn
+  when the aircraft falls outside the planned circle, so a bank mismatch
+  cannot leave the LNAV bank shallow and overshoot the outbound course.
+- Fly-by bank is scheduled with groundspeed: `lnav_turn_bank_deg` (17 deg
+  default) at/below `lnav_turn_bank_low_kt`, `lnav_turn_bank_high_deg`
+  (18 deg default) at/above `lnav_turn_bank_high_kt`.  This matches the
+  FF757's speed-dependent AFDS bank limit instead of using one fixed value.
+- CDI course/distance checks are paused inside the corner window (next leg
+  differs by more than 5 deg and the fix is within 20 NM): the FMS CDI jumps
+  at sequencing exactly when the arc must run, and a sustained-disagreement
+  fallback used to drop the turn to GPS CDI (turn=0).
+- The intercept magnitude at a leg change is carried for up to 3 s (decayed
+  linearly) so the homing angle does not collapse when the distance jumps to
+  the next leg.
+- The L1 look-ahead correction cap is now `lnav_l1_max_deg` (8 deg default,
+  was hard-coded 4 deg).  After a high-speed turn with a 5-6 NM overshoot the
+  4 deg term saturated while the 30 deg base capture could not close the
+  offset before the next fix; 8 deg gives a firmer recovery without changing
+  the small-offset case.
+- The `LNAV servo` log line and the status-window LNAV line now print the
+  actual bank (`bank=`, from `roll_AHARS_deg_pilot`), so the commanded turn can
+  be checked against the bank the aircraft really holds.
+- The CDU rescan keeps up to two legs that preceded the new first fix.  A
+  rescan during a departure turn used to drop the inbound leg (live: the SUPAR
+  scan returned active=0 with SUPAR as wpt[0]), leaving the leg latch without
+  the geometry for its fly-by arc.
+- First-leg placeholder fixes (`(500)` / `(520)` from the private route
+  arrays) are rejected as a leg origin; the synthetic inbound line is used
+  instead, avoiding a false CDI disagreement on the first departure leg.
+- Tests: guidance 222 (was 203), CDU 48, CIFP 21.
+
+## 1.2.36+vnav-profile — 2026-11-10
+
+Zibo-style VNAV vertical profile (opt-in build).
+
+- Adds `vnav_path_profile`, `vnav_path_angle_deg` and `vnav_path_dev_gain`.
+  The profile is built backwards from the last altitude constraint (E/D) as a
+  piecewise idle path, with every constrained fix becoming a breakpoint
+  (`AT` pins the path, `A` is a floor, `B` is a ceiling).  Pitch follows the
+  local gradient plus a path-deviation term instead of a chord to the next
+  altitude.
+- Keeps the last passed exact constraint as a negative-distance anchor so
+  waypoint sequencing does not restart the path on a 3 deg line and force a
+  shallow re-capture.
+- MCP altitude remains a descent floor; TOD is detected from the real path
+  (`ROUTE HOLD` before it); the E/D holds the last constraint altitude.
+- The legacy target logic is untouched and is used whenever the profile is
+  disabled, the route is climbing, has no constraints, or the path gradient
+  is implausible (>1000 ft/NM).
+- Tests: guidance 203 (was 188), CDU 48, CIFP 21.
+- Base note: this tree is the 1.2.36 source.  The 1.2.37–1.2.50 changes are
+  not present in this workspace.
+
 ## 1.2.36 — 2026-11-08
 
 Hold detection matches the real FF757 display.

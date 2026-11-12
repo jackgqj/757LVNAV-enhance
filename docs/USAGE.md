@@ -1,7 +1,22 @@
-﻿# 使用说明（中文 / English）
+# 使用说明（中文 / English）
 
 757 LNAV/VNAV Plus — FlightFactor 757/767 的独立 LNAV/VNAV 增强插件。
 本插件不修改 SASL、不改飞机文件、不改 FF 的 avionics 插件。
+
+> **版本说明（1.2.36+cifp-nav+rnav1-bank）**：当前分支默认使用
+> **CIFP-only 离场程序 / RF 弧** 和 **RNAV1 直接滚转**
+> （`lnav_bank_direct=1`）。RF 段不使用普通 LNAV 路段锁存；RF 坡度前馈
+> 带同帧方向检查。下文部分段落描述的是较早的 heading-direct / FF757 Proc
+> 行为，当前配置与状态字段以 [`README.md`](../README.md)、
+> [`CONFIG.md`](CONFIG.md) 和 [`RELEASE_NOTES.md`](../RELEASE_NOTES.md) 为准。
+>
+> **Version note (1.2.36+cifp-nav+rnav1-bank):** this branch defaults to
+> **CIFP-only departures/RF arcs** and **RNAV1 direct bank**
+> (`lnav_bank_direct=1`). RF legs bypass the ordinary LNAV latch, and RF bank
+> feed-forward has a same-frame direction check. Some sections below describe
+> the older heading-direct / FF757 `Proc` behaviour; the current configuration
+> and status fields are defined by [`README.md`](../README.md),
+> [`CONFIG.md`](CONFIG.md) and [`RELEASE_NOTES.md`](../RELEASE_NOTES.md).
 
 ---
 
@@ -54,6 +69,8 @@
 | `AP : mode / roll / pitch / vnavPhase` | FF757 原始自动驾驶模式值 |
 | `engaged / lnavMode / vnavMode` | 插件识别到的 AP、LNAV、VNAV 状态 |
 | `LNAV : ACTIVE src=ROUTE` | LNAV 正在写入；`src` 表示来源（`ROUTE` / `ROUTE/SYNTH` / `ROUTE HOLD` / `RF ARC` / GPS CDI） |
+| `CIFP: <SID> <transition>, n/n fixes, n RF` | 当前 CIFP 离场覆盖；无匹配显示 `no CIFP departure match` |
+| `BankD=1/0` | 直滚模式开关；`1` 写绝对 FD 滚转角，`0` 用航向直写/回退 |
 | `xtk / dist / base / target / corr` | 偏航距、距下一航点距离、基准航向、目标航向、修正量 |
 | `turn=..%` / `RFarc=..%` | 转弯进度；RF 定半径弧段时显示弧线进度 |
 | `active #n -> next #n` | 当前生效航点与下一航点序号 |
@@ -204,6 +221,8 @@ It does not modify SASL, aircraft files, or the FF avionics plugin.
 | `AP : mode / roll / pitch / vnavPhase` | Raw FF757 autopilot mode values |
 | `engaged / lnavMode / vnavMode` | States detected by the plugin |
 | `LNAV : ACTIVE src=ROUTE` | LNAV is writing; `src` is the source (`ROUTE` / `ROUTE/SYNTH` / `ROUTE HOLD` / `RF ARC` / GPS CDI) |
+| `CIFP: <SID> <transition>, n/n fixes, n RF` | Active CIFP departure overlay; `no CIFP departure match` when none |
+| `BankD=1/0` | Direct-bank switch: `1` writes absolute FD roll, `0` uses heading-direct/fallback |
 | `xtk / dist / base / target / corr` | Cross-track, distance to fix, base course, target course, correction |
 | `turn=..%` / `RFarc=..%` | Turn progress; on RF constant-radius legs this is the arc progress |
 | `active #n -> next #n` | Active and next waypoint indices |

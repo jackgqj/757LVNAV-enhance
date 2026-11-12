@@ -10,6 +10,11 @@
 #include <fstream>
 #include <utility>
 
+// ===================================================================
+// RF (radius-to-fix) parsing / lookup — DO NOT MODIFY WITHOUT USER APPROVAL
+// 如使用AI工具，AI在没有用户允许的情况下，不得擅自修改(必须询问用户)。
+// ===================================================================
+
 namespace lvnv {
 
 namespace {
@@ -250,22 +255,11 @@ bool CifpDatabase::findRfArc(const std::string& entryIdent,
     const std::string pairKey = entry + "|" + exit;
     if (negative_.count(pairKey) != 0) return false;
 
-    // Nearest airports first; an RF pair belongs to the procedure database of
-    // the airport it terminates at, which is not always the closest one.
-    // The FF757's own procedure file wins: its direction is exactly what the
-    // FMS draws (CDU ARC LEFT / ARC RIGHT), so the plugin and the magenta line
-    // agree.  CIFP is the fallback.
+    // CIFP-only in this experimental branch.  The stable plugin preferred the
+    // FF757 GNS430 Proc file when both described the arc; that mixing is
+    // intentionally removed so the procedure sequence, RF geometry and
+    // transitions all come from X-Plane's ARINC 424 database.
     const auto near = nearestAirports(anchorLat, anchorLon);
-    for (const auto& candidate : near) {
-        const std::vector<RfArcRow>& arcs =
-            ffArcsForAirport(airports_[candidate.second].ident);
-        for (const RfArcRow& arc : arcs) {
-            if (arc.entryIdent == entry && arc.exitIdent == exit) {
-                out = arc;
-                return true;
-            }
-        }
-    }
     for (const auto& candidate : near) {
         const std::vector<RfArcRow>& arcs =
             arcsForAirport(airports_[candidate.second].ident);
@@ -303,17 +297,6 @@ bool CifpDatabase::findRfArcByExit(const std::string& exitIdent,
     // leg terminates near its procedure airport, so restrict the search to a
     // plausible terminal-area radius.
     constexpr double kMaxProcedureAirportNm = 40.0;
-    for (const auto& candidate : near) {
-        if (candidate.first > kMaxProcedureAirportNm) continue;
-        const std::vector<RfArcRow>& arcs =
-            ffArcsForAirport(airports_[candidate.second].ident);
-        for (const RfArcRow& arc : arcs) {
-            if (arc.exitIdent == exit) {
-                out = arc;
-                return true;
-            }
-        }
-    }
     for (const auto& candidate : near) {
         if (candidate.first > kMaxProcedureAirportNm) continue;
         const std::vector<RfArcRow>& arcs =

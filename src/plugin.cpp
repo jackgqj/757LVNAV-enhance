@@ -7,6 +7,7 @@
 #include "XPLMUtilities.h"
 
 #include "config.h"
+#include "bank_controller.h"
 #include "geo.h"
 #include "guidance.h"
 #include "log.h"
@@ -271,6 +272,16 @@ double g_rollFilteredBaseline = 0.0;
 double g_rollLastBaseline = 0.0;
 double g_rollLastOut = 0.0;
 bool g_ownRollOverride = false;
+bool g_bankDirectInit = false;
+double g_bankDirectLastOut = 0.0;
+double g_lastBankDirectCmd = 0.0;
+bool g_bankFilterInit = false;
+double g_bankFilteredCmd = 0.0;
+bool g_bankDampInit = false;
+double g_lastBankTrackMag = 0.0;
+bool g_bankCourseTrendInit = false;
+double g_lastBankDesiredCourseMag = 0.0;
+bool g_bankFeedForwardUsed = false;
 int g_rollWriteCount = 0;
 bool g_cockpit2RollProbeDone = false;
 bool g_cockpit2RollWritable = false;
@@ -1011,6 +1022,16 @@ void ClearRollOverride() {
     }
     g_ownRollOverride = false;
     g_rollFilterInit = false;
+    g_bankDirectInit = false;
+    g_bankDirectLastOut = 0.0;
+    g_lastBankDirectCmd = 0.0;
+    g_bankFilterInit = false;
+    g_bankFilteredCmd = 0.0;
+    g_bankDampInit = false;
+    g_lastBankTrackMag = 0.0;
+    g_bankCourseTrendInit = false;
+    g_lastBankDesiredCourseMag = 0.0;
+    g_bankFeedForwardUsed = false;
     g_rollLastOut = 0.0;
     g_rollWriteCount = 0;
     g_lastCockpit2RollOut = 1.0e9f;
@@ -1105,7 +1126,156 @@ bool WriteFdRoll(double correctionDeg, double dt) {
 }
 
 // ---------------------------------------------------------------------------
-// diagnostics
+// direct bank (RNAV1 experiment)
+
+double ComputeBankTarget(double dt) {
+    const double trackMag =
+        magneticFromTrue(g_state.trackTrueDeg, g_state.magVarDeg);
+
+    // Feed-forward direction consistency.  On an RF arc the resolved turn
+    // direction can disagree with the target-course trend (seen at IDBON:
+    // tb=-6 while the desired course rose 79->115).  Applying that
+    // feed-forward held the wings against the turn and the heading appeared
+    // stuck.  If the sign opposes the observed course trend, do not use the
+    // feed-forward; fall back to the normal track/cross-track command.
+    bool useFeedForward = g_lnav.turnBankValid;
+    if (useFeedForward) {
+        // Same-frame check: the bank feed-forward must point the same way as
+        // the current target-course error.  At IDBON track was 121 while the
+        // target course was 83 (left error) but the RF feed-forward was +21
+        // (right); the trend check alone missed it when the trend state reset
+        // across the route/RF transition.
+        const double ffTrackErr =
+            normalize180(g_lnav.desiredCourseMagDeg - trackMag);
+        if (std::abs(ffTrackErr) > 2.0 &&
+            ffTrackErr * g_lnav.turnBankDeg < 0.0) {
+            useFeedForward = false;
+        }
+
+        const double courseDelta = normalize180(
+            g_lnav.desiredCourseMagDeg - g_lastBankDesiredCourseMag);
+        if (g_bankCourseTrendInit && std::abs(courseDelta) > 0.12 &&
+            courseDelta * g_lnav.turnBankDeg < 0.0) {
+            useFeedForward = false;
+        }
+        g_bankCourseTrendInit = true;
+        g_lastBankDesiredCourseMag = g_lnav.desiredCourseMagDeg;
+    }
+    g_bankFeedForwardUsed = useFeedForward;
+
+    if (useFeedForward) {
+        // On a planned fly-by/RF arc the arc itself owns the bank.  Using the
+        // cross-track term here was rolling the wings back early: a 0.4 NM
+        // offset at short look-ahead produced a 15-20 deg opposing command
+        // while the aircraft was still mid-turn.  Keep only a small track-error
+        // correction; the arc geometry (radial correction) handles the path.
+        const double trackErr =
+            normalize180(g_lnav.desiredCourseMagDeg - trackMag);
+        const double corr = clampd(0.3 * g_config.lnavBankKTrack * trackErr,
+                                   -4.0, 4.0);
+        g_bankDampInit = false;
+        g_lastBankTrackMag = trackMag;
+        return clampd(g_lnav.turnBankDeg + corr,
+                      -g_config.lnavBankMaxDeg, g_config.lnavBankMaxDeg);
+    }
+
+    const double trackErr =
+        normalize180(g_lnav.desiredCourseMagDeg - trackMag);
+    double bank = ComputeBankCommandDeg(
+        g_lnav.desiredCourseMagDeg, trackMag, g_lnav.xtkNm,
+        g_lnav.distanceNm, g_config.lnavBankKTrack, g_config.lnavBankKXtk,
+        g_config.lnavBankMaxDeg);
+
+    // Do not chase sub-degree track jitter / centimetre cross-track noise in
+    // turbulence.  The deadband is small enough not to affect a real deviation.
+    if (std::abs(trackErr) < g_config.lnavBankDeadbandDeg &&
+        std::abs(g_lnav.xtkNm) < g_config.lnavBankDeadbandNm) {
+        bank = 0.0;
+    }
+
+    // Mild damping against a developing turn rate.  Without it a large capture
+    // keeps full bank past the course and then reverses; this only trims a few
+    // degrees near the rollout, not the main turn command.
+    if (g_config.lnavBankTrackRateDamp > 0.01 && dt > 0.001) {
+        if (!g_bankDampInit) {
+            g_bankDampInit = true;
+            g_lastBankTrackMag = trackMag;
+        }
+        const double dts = clampd(dt, 0.02, 0.20);
+        const double trackRate =
+            normalize180(trackMag - g_lastBankTrackMag) / dts;
+        g_lastBankTrackMag = trackMag;
+        bank -= clampd(g_config.lnavBankTrackRateDamp * trackRate, -6.0, 6.0);
+    }
+
+    if (g_config.lnavBankFilterTauSec > 0.001) {
+        if (!g_bankFilterInit) {
+            g_bankFilteredCmd = bank;
+            g_bankFilterInit = true;
+        }
+        const double alpha = clampd(
+            1.0 - std::exp(-dt / g_config.lnavBankFilterTauSec), 0.0, 1.0);
+        g_bankFilteredCmd =
+            alpha * bank + (1.0 - alpha) * g_bankFilteredCmd;
+        bank = g_bankFilteredCmd;
+    }
+    return clampd(bank, -g_config.lnavBankMaxDeg, g_config.lnavBankMaxDeg);
+}
+
+bool WriteBankDirect(double bankDeg, double dt) {
+    if (!g_refs.fdRollLegacy || !g_refs.fdRollLegacyWritable) {
+        g_lnav.note = "direct bank: legacy FD roll is not writable";
+        return false;
+    }
+
+    const double target =
+        clampd(bankDeg, -g_config.lnavBankMaxDeg, g_config.lnavBankMaxDeg);
+    if (!g_bankDirectInit) {
+        g_bankDirectLastOut = target;
+        g_bankDirectInit = true;
+    }
+    const double maxRate =
+        g_config.lnavBankRateDegPerSec * std::max(dt, 0.001);
+    double out = g_bankDirectLastOut +
+                 clampd(target - g_bankDirectLastOut, -maxRate, maxRate);
+    out = clampd(out, -35.0, 35.0);
+
+    if (g_refs.overrideRoll && g_refs.overrideRollWritable) {
+        if (XPLMGetDatai(g_refs.overrideRoll) == 0) {
+            XPLMSetDatai(g_refs.overrideRoll, 1);
+            g_ownRollOverride = true;
+        } else if (g_ownRollOverride) {
+            XPLMSetDatai(g_refs.overrideRoll, 1);
+        }
+    }
+
+    XPLMSetDataf(g_refs.fdRollLegacy, static_cast<float>(out));
+
+    if (g_refs.fdRollCockpit2) {
+        if (!g_cockpit2RollProbeDone) {
+            const float probe = static_cast<float>(out + 0.25);
+            XPLMSetDataf(g_refs.fdRollCockpit2, probe);
+            const float readback = XPLMGetDataf(g_refs.fdRollCockpit2);
+            g_cockpit2RollWritable = Finite(readback) &&
+                                     std::abs(readback - probe) < 0.05f;
+            g_cockpit2RollProbeDone = true;
+        }
+        if (g_cockpit2RollWritable) {
+            XPLMSetDataf(g_refs.fdRollCockpit2, static_cast<float>(out));
+        }
+    }
+
+    g_lastCockpit2RollOut = static_cast<float>(out);
+    g_lastLegacyRollOut = static_cast<float>(out);
+    g_lastCockpit2RollCorrection = out;
+    g_lastLegacyRollCorrection = out;
+    g_bankDirectLastOut = out;
+    g_lastBankDirectCmd = bankDeg;
+    ++g_rollWriteCount;
+    return true;
+}
+
+
 
 std::string PrintablePreview(const std::vector<char>& buf, int maxChars = 240) {
     std::string out;
@@ -1355,6 +1525,8 @@ enum MenuId {
     MI_SMOOTHING,
     MI_FD_ROLL,
     MI_CDI_SOURCE,
+    MI_CIFP_PROC,
+    MI_BANK_DIRECT,
     MI_CDU_SCAN,
     MI_STATUS,
     MI_RELOAD,
@@ -1380,6 +1552,8 @@ void UpdateMenuChecks() {
     XPLMCheckMenuItem(g_menu, 3, g_config.enableVnavSmoothing ? xplm_Menu_Checked : xplm_Menu_Unchecked);
     XPLMCheckMenuItem(g_menu, 4, g_config.enableLnavFdRoll ? xplm_Menu_Checked : xplm_Menu_Unchecked);
     XPLMCheckMenuItem(g_menu, 5, g_config.lnavForceCdi ? xplm_Menu_Checked : xplm_Menu_Unchecked);
+    XPLMCheckMenuItem(g_menu, 6, g_config.cifpProcedureRoute ? xplm_Menu_Checked : xplm_Menu_Unchecked);
+    XPLMCheckMenuItem(g_menu, 7, g_config.lnavBankDirect ? xplm_Menu_Checked : xplm_Menu_Unchecked);
 }
 
 void SetWindowVisible(bool visible) {
@@ -1449,6 +1623,26 @@ void ToggleCdiSource() {
          g_config.lnavForceCdi ? "GPS CDI (forced)" : "route");
 }
 
+void ToggleCifpProcedure() {
+    g_config.cifpProcedureRoute = !g_config.cifpProcedureRoute;
+    g_routeReader.setCifpProcedureEnabled(g_config.cifpProcedureRoute);
+    g_guidance.reset();
+    SaveConfig();
+    UpdateMenuChecks();
+    Logf("CIFP departure route %s",
+         g_config.cifpProcedureRoute ? "enabled" : "disabled");
+}
+
+void ToggleBankDirect() {
+    g_config.lnavBankDirect = !g_config.lnavBankDirect;
+    if (!g_config.lnavBankDirect) ClearRollOverride();
+    g_guidance.reset();
+    SaveConfig();
+    UpdateMenuChecks();
+    Logf("LNAV direct bank %s",
+         g_config.lnavBankDirect ? "enabled" : "disabled");
+}
+
 void ReloadConfig() {
     g_config.load(ConfigPath());
     g_config.clampValues();
@@ -1456,6 +1650,7 @@ void ReloadConfig() {
                                         ? g_config.cduRescanIntervalSec
                                         : 0.0);
     g_routeReader.setScanOnExecOnly(g_config.cduScanOnExecOnly);
+    g_routeReader.setCifpProcedureEnabled(g_config.cifpProcedureRoute);
     SyncPublishedFromConfig();
     g_guidance.reset();
     UpdateMenuChecks();
@@ -1468,6 +1663,7 @@ void ResetDefaults() {
                                         ? g_config.cduRescanIntervalSec
                                         : 0.0);
     g_routeReader.setScanOnExecOnly(g_config.cduScanOnExecOnly);
+    g_routeReader.setCifpProcedureEnabled(g_config.cifpProcedureRoute);
     SyncPublishedFromConfig();
     g_pub.enabled = 1;
     g_pub.lnavEnabled = 1;
@@ -1494,6 +1690,8 @@ void MenuHandler(void* menuRef, void* itemRef) {
         case MI_SMOOTHING: ToggleSmoothing(); break;
         case MI_FD_ROLL: ToggleFdRoll(); break;
         case MI_CDI_SOURCE: ToggleCdiSource(); break;
+        case MI_CIFP_PROC: ToggleCifpProcedure(); break;
+        case MI_BANK_DIRECT: ToggleBankDirect(); break;
         case MI_CDU_SCAN:
             g_routeReader.requestScan();
             Logf("CDU route rescan requested");
@@ -1522,6 +1720,8 @@ int CommandHandler(XPLMCommandRef cmd, XPLMCommandPhase phase, void* refcon) {
         case MI_VNAV: ToggleVnav(); break;
         case MI_FD_ROLL: ToggleFdRoll(); break;
         case MI_CDI_SOURCE: ToggleCdiSource(); break;
+        case MI_CIFP_PROC: ToggleCifpProcedure(); break;
+        case MI_BANK_DIRECT: ToggleBankDirect(); break;
         case MI_CDU_SCAN:
             g_routeReader.requestScan();
             Logf("CDU route rescan requested");
@@ -1554,6 +1754,8 @@ void CreateMenuAndCommands() {
         XPLMAppendMenuItem(g_menu, "VNAV smoothing", reinterpret_cast<void*>(MI_SMOOTHING), 1);
         XPLMAppendMenuItem(g_menu, "LNAV FD roll (experimental)", reinterpret_cast<void*>(MI_FD_ROLL), 1);
         XPLMAppendMenuItem(g_menu, "LNAV source: GPS CDI", reinterpret_cast<void*>(MI_CDI_SOURCE), 1);
+        XPLMAppendMenuItem(g_menu, "CIFP departure route", reinterpret_cast<void*>(MI_CIFP_PROC), 1);
+        XPLMAppendMenuItem(g_menu, "LNAV bank direct (RNAV1)", reinterpret_cast<void*>(MI_BANK_DIRECT), 1);
         XPLMAppendMenuItem(g_menu, "Rescan CDU route", reinterpret_cast<void*>(MI_CDU_SCAN), 1);
         XPLMAppendMenuItem(g_menu, "Show status window", reinterpret_cast<void*>(MI_STATUS), 1);
         XPLMAppendMenuItem(g_menu, "Reload config", reinterpret_cast<void*>(MI_RELOAD), 1);
@@ -1645,10 +1847,10 @@ void DrawStatusWindow(XPLMWindowID window, void* refcon) {
     DrawText(x, y, buf, ln.active ? 0.55f : 0.8f, ln.active ? 1.0f : 0.8f, ln.active ? 0.55f : 0.8f);
     y -= lineH;
 
-    std::snprintf(buf, sizeof(buf), "          base=%6.1f  target=%6.1f  corr=%+.1f deg  %s=%.0f%%",
+    std::snprintf(buf, sizeof(buf), "          base=%6.1f  target=%6.1f  corr=%+.1f deg  %s=%.0f%%  bank=%+.1f",
                   ln.baseCourseMagDeg, ln.desiredCourseMagDeg, ln.correctionDeg,
                   ln.source == "RF ARC" ? "RFarc" : "turn",
-                  ln.turnProgress * 100.0);
+                  ln.turnProgress * 100.0, RdF(g_refs.rollAngleDeg, NAN));
     DrawText(x, y, buf, 0.9f, 0.9f, 0.9f);
     y -= lineH;
 
@@ -1727,12 +1929,20 @@ void DrawStatusWindow(XPLMWindowID window, void* refcon) {
     std::snprintf(buf, sizeof(buf), "          active=%s  next=%s",
                   g_status.activeId.c_str(), g_status.nextId.c_str());
     DrawText(x, y, buf, 0.9f, 0.9f, 0.9f);
-    y -= lineH + 4;
+    y -= lineH;
+    if (g_routeReader.route().procedureAssisted) {
+        std::snprintf(buf, sizeof(buf), "          CIFP: %s",
+                      g_routeReader.cifpProcedureNote().c_str());
+        DrawText(x, y, buf, 0.55f, 0.9f, 1.0f);
+        y -= lineH;
+    }
+    y -= 4;
 
-    std::snprintf(buf, sizeof(buf), "Config  : LNAV=%d VNAV=%d smooth=%d FDRoll=%d debug=%d",
+    std::snprintf(buf, sizeof(buf), "Config  : LNAV=%d VNAV=%d smooth=%d FDRoll=%d BankD=%d debug=%d",
                   g_config.enableLnav ? 1 : 0, g_config.enableVnav ? 1 : 0,
                   g_config.enableVnavSmoothing ? 1 : 0,
-                  g_config.enableLnavFdRoll ? 1 : 0, g_config.debug ? 1 : 0);
+                  g_config.enableLnavFdRoll ? 1 : 0,
+                  g_config.lnavBankDirect ? 1 : 0, g_config.debug ? 1 : 0);
     DrawText(x, y, buf, 0.9f, 0.9f, 0.9f);
     y -= lineH;
 
@@ -2022,6 +2232,11 @@ float FlightLoopCallback(float elapsedSinceLastCall, float, int, void*) {
 
         g_routeReader.refresh(XPLMGetElapsedTime(), false);
         ReadAircraftState(dt);
+        // Merge the detected CIFP departure prefix (including RF arcs) ahead
+        // of the FMS/CDU route before guidance consumes it.
+        g_routeReader.applyCifpProcedure(g_state.lat, g_state.lon,
+                                         g_config.cifpProcedureRoute,
+                                         XPLMGetElapsedTime());
         // Use the avionics-owned roll baseline (not our own cockpit2 write) for
         // CDI sign calibration.
         const float fdRollBaseline = ReadFdRollBaseline();
@@ -2037,6 +2252,9 @@ float FlightLoopCallback(float elapsedSinceLastCall, float, int, void*) {
         // publishing nav_steer.
         g_navSteerFrameStart = RdF(g_refs.navSteer, NAN);
 
+        // LNAV MODULE — AI WARNING
+        // 致AI的一个警告：如果用户给你的指令是搞VNAV，请不要动LNAV。
+        // If the user's instruction is about VNAV, do not modify LNAV.
         g_lnav = g_guidance.computeLnav(g_state, g_routeReader.route(), g_cdi, g_config);
         g_vnav = g_guidance.computeVnav(g_state, g_routeReader.route(), g_config, dt);
 
@@ -2049,6 +2267,27 @@ float FlightLoopCallback(float elapsedSinceLastCall, float, int, void*) {
             // switch is off, on RF arcs only (lnav_rf_nav_override).  Without
             // the override X-Plane's generic AP ignores nav_steer, so the
             // target would only be monitored instead of flown.
+            bool bankDirectActive = false;
+            if (g_config.lnavBankDirect && !g_state.onGround &&
+                g_refs.fdRollLegacyWritable) {
+                const double bankCmd = ComputeBankTarget(dt);
+                if (WriteBankDirect(bankCmd, dt)) {
+                    bankDirectActive = true;
+                    rollWritten = true;
+                    navWritten = false;
+                    ClearNavHeadingOverride();
+                    if (g_refs.overrideNavHeading &&
+                        g_refs.overrideNavHeadingWritable) {
+                        XPLMSetDatai(g_refs.overrideNavHeading, 0);
+                    }
+                    g_status.lnavOverride = g_state.lnavOverride;
+                    char bankNote[96];
+                    std::snprintf(bankNote, sizeof(bankNote),
+                                  "direct bank %+.1f (RNAV1)", g_bankDirectLastOut);
+                    g_lnav.note = bankNote;
+                }
+            }
+            if (!bankDirectActive) {
             const bool headingDirect = g_config.lnavHeadingDirect ||
                                        (rfArcNow && g_config.lnavRfNavOverride);
             double navTargetMag = normalize360(g_lnav.desiredCourseMagDeg);
@@ -2081,9 +2320,10 @@ float FlightLoopCallback(float elapsedSinceLastCall, float, int, void*) {
                     // homes at atan(xtk / distance-to-fix); on a long leg that
                     // is a fraction of a degree and leaves a small steady offset
                     // (0.15 NM at 28 NM commanded only 0.3 deg).  Add the
-                    // difference to an L1 look-ahead correction, clamped so the
-                    // large-offset Boeing capture is not disturbed.  RF arcs
-                    // already use the radial correction and are skipped.
+                    // difference to an L1 look-ahead correction, clamped to
+                    // lnav_l1_max_deg (8 deg default) so a post-turn overshoot
+                    // gets a firm capture while the small-offset case stays
+                    // gentle.  RF arcs already use the radial correction.
                     if (!rfArcNow && Finite(g_lnav.xtkNm) &&
                         g_lnav.distanceNm > 0.5 && g_config.lnavL1Factor > 0.0) {
                         const double turnR =
@@ -2093,7 +2333,10 @@ float FlightLoopCallback(float elapsedSinceLastCall, float, int, void*) {
                         const double homingDeg = rad2deg(std::atan2(
                             -g_lnav.xtkNm, std::max(0.2, g_lnav.distanceNm)));
                         const double l1Deg = rad2deg(std::atan2(-g_lnav.xtkNm, l1));
-                        const double extra = clampd(l1Deg - homingDeg, -4.0, 4.0);
+                        const double extra =
+                            clampd(l1Deg - homingDeg,
+                                   -g_config.lnavL1MaxDeg,
+                                   g_config.lnavL1MaxDeg);
                         l1Used = extra;
                         navTargetMag = normalize360(navTargetMag + extra);
                     }
@@ -2175,6 +2418,7 @@ float FlightLoopCallback(float elapsedSinceLastCall, float, int, void*) {
                     g_lnav.note = "FD roll augmentation disabled (safe default)";
                 }
             }
+            }  // !bankDirectActive
         } else {
             ClearRollOverride();
             ClearNavHeadingOverride();
@@ -2192,6 +2436,7 @@ float FlightLoopCallback(float elapsedSinceLastCall, float, int, void*) {
             Logf("LNAV servo: src=%s track=%.1f base=%.1f course=%.1f "
                  "xtk=%+.2f dist=%.1f corr=%+.2f cmd=%.1f prev=%.1f "
                  "damp=%+.2f l1=%+.2f ovr=%d fmsDot=%+.3f turn=%.0f "
+                 "bank=%+.1f bankCmd=%+.1f tb=%d/%.1f ff=%d tz=%d rem=%.1f tan=%.1f arc=%.1f "
                  "active=%d next=%d",
                  g_lnav.source.c_str(), trackMag, g_lnav.baseCourseMagDeg,
                  g_lnav.desiredCourseMagDeg, g_lnav.xtkNm, g_lnav.distanceNm,
@@ -2199,7 +2444,11 @@ float FlightLoopCallback(float elapsedSinceLastCall, float, int, void*) {
                  g_navSteerFrameStart, g_lastLnavDamp, g_lastLnavL1,
                  g_state.lnavOverride ? 1 : 0,
                  RdF(g_refs.gpsHdefDot, NAN), g_lnav.turnProgress,
-                 g_lnav.activeWpt, g_lnav.nextLeg);
+                 RdF(g_refs.rollAngleDeg, NAN), g_lastBankDirectCmd,
+                 g_lnav.turnBankValid ? 1 : 0, g_lnav.turnBankDeg,
+                 g_bankFeedForwardUsed ? 1 : 0,
+                 g_lnav.turnZone, g_lnav.turnRemainNm, g_lnav.turnTangentNm,
+                 g_lnav.turnArcDeg, g_lnav.activeWpt, g_lnav.nextLeg);
         }
 
         bool pitchWritten = false;

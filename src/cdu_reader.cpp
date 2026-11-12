@@ -647,7 +647,8 @@ void CduRouteReader::finishScan(double elapsed) {
         // scanned inbound fix when the new page set starts at the old active
         // waypoint.  That gives the geometry layer a real leg without asking
         // the avionics for a course.
-        if (cacheValid_ && !cache_.legs.empty()) {
+        if (cacheValid_ && !cache_.legs.empty() &&
+            cache_.routeName == merged.routeName) {
             int oldActive = activeIndex_;
             if (oldActive < 0) oldActive = 0;
             if (oldActive >= static_cast<int>(cache_.legs.size())) {
@@ -661,11 +662,30 @@ void CduRouteReader::finishScan(double elapsed) {
             keepActiveId = cache_.legs[static_cast<size_t>(keepIdx)].id;
 
             const std::string& newFirst = merged.legs.front().id;
-            if (oldActive > 0 && !newFirst.empty() &&
-                cache_.legs[static_cast<size_t>(oldActive)].id == newFirst) {
+            // Keep up to two legs that preceded the new first fix.  The LEGS
+            // page normally starts at the active waypoint, so a rescan during
+            // a turn dropped the inbound leg and left guidance without the
+            // geometry for its fly-by arc (live: the SUPAR scan returned
+            // active=0 with SUPAR as wpt[0], right when the 59 deg turn
+            // needed HC606 -> SUPAR).  Search the whole old cache, not only
+            // oldActive: the Airnav sync can move activeIndex_ ahead while the
+            // page is being scanned.
+            int newFirstIdx = -1;
+            if (!newFirst.empty()) {
+                for (int i = static_cast<int>(cache_.legs.size()) - 1; i >= 0; --i) {
+                    if (cache_.legs[static_cast<size_t>(i)].id == newFirst) {
+                        newFirstIdx = i;
+                        break;
+                    }
+                }
+            }
+            if (newFirstIdx > 0) {
+                constexpr int kMaxPreserved = 2;
+                const int keep = std::min(kMaxPreserved, newFirstIdx);
                 merged.legs.insert(merged.legs.begin(),
-                                   cache_.legs[static_cast<size_t>(oldActive - 1)]);
-                initialActive = 1;
+                                   cache_.legs.begin() + (newFirstIdx - keep),
+                                   cache_.legs.begin() + newFirstIdx);
+                initialActive = keep;
             }
         }
 

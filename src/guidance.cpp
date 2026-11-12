@@ -1,8 +1,15 @@
 #include "guidance.h"
 
+// ===================================================================
+// LNAV MODULE — AI WARNING
+// 致AI的一个警告：如果用户给你的指令是搞VNAV，请不要动LNAV。
+// If the user's instruction is about VNAV, do not modify LNAV.
+// ===================================================================
+
 #include "geo.h"
 
 #include <algorithm>
+#include <cctype>
 #include <climits>
 #include <cmath>
 #include <cstdio>
@@ -10,6 +17,21 @@
 namespace lvnv {
 
 namespace {
+
+// The FF757 private route arrays carry program-generated placeholder entries
+// for the origin and destination airport, e.g. "(500)" / "(520)", with the
+// airport reference coordinates and a 50000 ft sentinel altitude.  Such an
+// entry is not a fix and must never become a leg origin: live ZSHC RWY25
+// SUPAR8D produced a route course of 145 deg against the FMS 234 deg, which
+// tripped the sustained CDI disagreement check and dropped LNAV to GPS CDI for
+// the whole departure.
+bool placeholderIdent(const std::string& id) {
+    if (id.size() < 3 || id.front() != '(' || id.back() != ')') return false;
+    for (size_t i = 1; i + 1 < id.size(); ++i) {
+        if (!std::isdigit(static_cast<unsigned char>(id[i]))) return false;
+    }
+    return true;
+}
 
 double currentMagTrack(const AircraftState& s) {
     return magneticFromTrue(s.trackTrueDeg, s.magVarDeg);
@@ -205,6 +227,186 @@ SpeedTarget FindSpeedTarget(const RouteSnapshot& route, const AircraftState& sta
     return t;
 }
 
+// --- Zibo-style vertical profile -----------------------------------------
+// A descent profile is a piecewise-linear idle path built backwards from the
+// last altitude constraint (the E/D).  Each constrained fix becomes a vertex:
+// an "at" fix pins the path, a floor keeps it at or above the published
+// minimum, and a ceiling keeps it at or below the maximum.  Unconstrained
+// fixes are interpolated on the segment between vertices.  This mirrors the
+// Zibo create_idle_path/recalc_vnav model: the aircraft follows one local
+// gradient instead of a fresh chord to the next altitude every frame.
+constexpr double kVnavFtPerNm = 6076.11549;
+
+struct VnavProfileVertex {
+    double distNm = 0.0;    // along the route from the aircraft
+    double altFt = 0.0;
+    int wptIndex = -1;
+};
+
+struct VnavProfile {
+    bool valid = false;
+    double nominalFtPerNm = 0.0;
+    std::vector<VnavProfileVertex> vertices;  // ascending distance
+    int endWpt = -1;
+    double endAltFt = 0.0;
+    double endDistNm = 0.0;
+};
+
+struct ProfConstraint {
+    int idx = -1;
+    double distNm = 0.0;
+    int altFt = 0;
+    AltConstraint kind = AltAt;
+};
+
+VnavProfile BuildVnavProfile(const RouteSnapshot& route, const AircraftState& state,
+                             const Config& cfg) {
+    VnavProfile p;
+    if (!route.valid || route.activeWpt < 0 ||
+        route.activeWpt >= route.wptCount) return p;
+    const RouteWaypoint* active = route.waypoint(route.activeWpt);
+    if (!active || !active->posValid) return p;
+    // The active fix is already behind the aircraft.  Its unsigned distance
+    // cannot anchor a forward path; let the legacy target logic handle the
+    // last few miles instead of building a profile behind the aircraft.
+    if (std::abs(normalize180(bearingTrue(state.lat, state.lon, active->lat,
+                                          active->lon) -
+                              state.trackTrueDeg)) > 90.0) {
+        return p;
+    }
+
+    p.nominalFtPerNm =
+        std::tan(cfg.vnavPathAngleDeg * 3.14159265358979323846 / 180.0) * kVnavFtPerNm;
+
+    double cum = distanceNm(state.lat, state.lon, active->lat, active->lon);
+    if (!std::isfinite(cum) || cum < 0.05) cum = 0.05;
+
+    std::vector<ProfConstraint> cs;
+    cs.reserve(static_cast<size_t>(route.wptCount - route.activeWpt));
+    for (int i = route.activeWpt; i < route.wptCount; ++i) {
+        const RouteWaypoint* w = route.waypoint(i);
+        if (!w || !w->posValid) break;
+        if (i > route.activeWpt) {
+            const RouteWaypoint* prev = route.waypoint(i - 1);
+            if (!prev || !prev->posValid) break;
+            const double seg = distanceNm(prev->lat, prev->lon, w->lat, w->lon);
+            if (!std::isfinite(seg)) break;
+            cum += seg;
+        }
+        if (cum > 500.0) break;   // same plausible lookahead as the legacy target
+        if (!w->altValid) continue;
+        if (w->altFt < -1000 || w->altFt > 60000) continue;
+        cs.push_back({i, cum, w->altFt, w->altConstraint});
+    }
+    if (cs.empty()) return p;
+
+    // Keep the last passed exact constraint as a vertex behind the aircraft.
+    // When the FMS sequences a waypoint, dropping it would restart the path
+    // on a 3 deg line from the new active fix, which jumps above the aircraft
+    // and forces a shallow capture.  An anchor at negative distance preserves
+    // the segment that was already being flown (Zibo keeps its descent table
+    // across sequencing for the same reason).
+    if (route.activeWpt > 0) {
+        for (int k = route.activeWpt - 1; k >= 0 && k >= route.activeWpt - 5; --k) {
+            const RouteWaypoint* prev = route.waypoint(k);
+            if (!prev || !prev->posValid || !prev->altValid) continue;
+            if (prev->altConstraint != AltAt) continue;
+            const double behind =
+                distanceNm(state.lat, state.lon, prev->lat, prev->lon);
+            if (!std::isfinite(behind) || behind > 60.0) break;
+            if (std::abs(normalize180(bearingTrue(state.lat, state.lon,
+                                                  prev->lat, prev->lon) -
+                                      state.trackTrueDeg)) < 90.0) {
+                break;
+            }
+            cs.insert(cs.begin(), ProfConstraint{k, -behind, prev->altFt, AltAt});
+            break;
+        }
+    }
+
+    const ProfConstraint& end = cs.back();
+    // This profile only models a descent.  A climb (or a level segment) keeps
+    // the legacy target logic.
+    if (static_cast<double>(end.altFt) > state.altFt - 300.0) return p;
+    if (end.distNm < 0.3) return p;
+    // A path that needs more than ~9.4 deg to reach the last constraint is a
+    // mis-parsed altitude, not a profile.  Fall back to the legacy guards.
+    const double endGradient =
+        (state.altFt - static_cast<double>(end.altFt)) / end.distNm;
+    if (endGradient > 1000.0) return p;
+
+    p.vertices.reserve(cs.size());
+    p.vertices.push_back({end.distNm, static_cast<double>(end.altFt), end.idx});
+    double nextAlt = static_cast<double>(end.altFt);
+    double nextDist = end.distNm;
+    for (int k = static_cast<int>(cs.size()) - 2; k >= 0; --k) {
+        const ProfConstraint& c = cs[static_cast<size_t>(k)];
+        const double span = std::max(0.0, nextDist - c.distNm);
+        double eff = nextAlt + p.nominalFtPerNm * span;
+        switch (c.kind) {
+            case AltAt:
+                eff = static_cast<double>(c.altFt);
+                break;
+            case AltAtOrAbove:
+                eff = std::max(eff, static_cast<double>(c.altFt));
+                break;
+            case AltAtOrBelow:
+                eff = std::min(eff, static_cast<double>(c.altFt));
+                break;
+        }
+        // In a descent the path before a fix cannot be below that fix.
+        if (eff < nextAlt) eff = nextAlt;
+        p.vertices.push_back({c.distNm, eff, c.idx});
+        nextAlt = eff;
+        nextDist = c.distNm;
+    }
+    // Built from the E/D backwards; guidance needs ascending distance.
+    std::reverse(p.vertices.begin(), p.vertices.end());
+
+    p.valid = !p.vertices.empty();
+    p.endWpt = end.idx;
+    p.endAltFt = static_cast<double>(end.altFt);
+    p.endDistNm = end.distNm;
+    return p;
+}
+
+// Path altitude and local gradient at a distance from the aircraft.
+bool VnavProfileAt(const VnavProfile& p, double distNm, double* altFt,
+                   double* gradientFtPerNm, bool* pastEnd) {
+    if (!p.valid || p.vertices.empty()) return false;
+    *pastEnd = false;
+    if (distNm > p.vertices.back().distNm + 1.0e-6) {
+        // Beyond the E/D: hold the last constraint altitude.
+        *pastEnd = true;
+        *altFt = p.vertices.back().altFt;
+        *gradientFtPerNm = 0.0;
+        return true;
+    }
+    if (distNm < p.vertices.front().distNm) {
+        // Before TOD: extrapolate the idle path backwards from the first
+        // vertex.  If the result is above the aircraft, VNAV holds altitude.
+        *altFt = p.vertices.front().altFt +
+                 p.nominalFtPerNm * (p.vertices.front().distNm - distNm);
+        *gradientFtPerNm = -p.nominalFtPerNm;
+        return true;
+    }
+    for (size_t k = 0; k + 1 < p.vertices.size(); ++k) {
+        const VnavProfileVertex& a = p.vertices[k];
+        const VnavProfileVertex& b = p.vertices[k + 1];
+        if (distNm <= b.distNm) {
+            const double span = b.distNm - a.distNm;
+            if (span < 1.0e-6) continue;
+            const double t = (distNm - a.distNm) / span;
+            *altFt = a.altFt + (b.altFt - a.altFt) * t;
+            *gradientFtPerNm = (b.altFt - a.altFt) / span;
+            return true;
+        }
+    }
+    *altFt = p.vertices.back().altFt;
+    *gradientFtPerNm = 0.0;
+    return true;
+}
+
 } // namespace
 
 void Guidance::reset() {
@@ -227,9 +429,15 @@ void Guidance::reset() {
     rfLegIdx_ = -1;
     rfLastRadialDeg_ = 0.0;
     rfProgressDeg_ = 0.0;
+    lastGuideLeg_ = -1;
+    lastInterceptDeg_ = 0.0;
+    cornerCarryDeg_ = 0.0;
+    cornerCarryFrames_ = 0;
+    latchedLeg_ = -1;
     vnavPathHeld_ = false;
     vnavPathErrorFt_ = 0.0;
     vnavTargetIndex_ = -1;
+    vnavProfileEndWpt_ = -1;
 }
 
 // Remaining route distance from a waypoint to the destination, seeded with
@@ -326,6 +534,7 @@ LnavResult Guidance::computeLnav(const AircraftState& state,
 
     bool useRoute = !cfg.lnavForceCdi && route.valid && route.sourceRoute &&
                     route.activeWpt >= 0 && route.activeLeg >= 0;
+    if (!useRoute) latchedLeg_ = -1;
     bool complexLeg = false;
     double routeXtkRight = 0.0;
     double routeDist = 0.0;
@@ -333,7 +542,131 @@ LnavResult Guidance::computeLnav(const AircraftState& state,
     double turnProgress = 0.0;
 
     if (useRoute) {
-        const RouteLeg* leg = route.leg(route.activeLeg);
+        // --- compromise leg latch -------------------------------------------
+        // The FF757 FMS sequences to the next waypoint at its own turn point,
+        // which at high speed is many miles before the fix (live: HC306 taken
+        // 9.4 NM early at 285 KT, SUPAR->OKTUG 12.2 NM early at 461 KT).
+        // Following the new leg immediately made the plugin chase its line
+        // with a 30 deg intercept, start the turn many miles early and then
+        // overshoot the outbound course.  Keep steering the previous leg
+        // while the aircraft is still before the shared fix; the previous
+        // leg's own fly-by arc then starts the turn at the tangent point and
+        // remains in charge through the corner.  The 30 NM guard keeps a
+        // pilot's direct-to (leg index jump) from latching onto an unrelated
+        // leg, and the turn-angle guard keeps near-straight legs unlatched.
+        //
+        // The latch is sticky because the FMS can sequence two legs inside one
+        // high-speed turn (HC306 -> HC606 -> SUPAR within 30 s in the live
+        // departure).  Recomputing it from route.activeLeg every frame dropped
+        // the corner halfway through when the second sequence arrived.
+        auto legStillAhead = [&](int legIdx, double* toFixOut) {
+            if (legIdx < 0 || legIdx >= route.legCount) return false;
+            const RouteLeg* l = route.leg(legIdx);
+            if (!l || l->complex) return false;
+            const RouteWaypoint* end = route.waypoint(l->lastWpt);
+            int startIdx = l->firstWpt;
+            if (l->firstWpt == l->lastWpt) {
+                startIdx = findPreviousLegEnd(route, legIdx);
+            }
+            const RouteWaypoint* start = route.waypoint(startIdx);
+            if (!end || !end->posValid || !start || !start->posValid) return false;
+            if (startIdx == l->lastWpt) return false;
+            const double legLen = distanceNm(start->lat, start->lon,
+                                             end->lat, end->lon);
+            const double along = alongTrackNm(state.lat, state.lon,
+                                              start->lat, start->lon,
+                                              end->lat, end->lon);
+            if (!std::isfinite(legLen) || !std::isfinite(along)) return false;
+            const double remain = legLen - along;
+            const double toFix = distanceNm(state.lat, state.lon,
+                                            end->lat, end->lon);
+            if (toFixOut) *toFixOut = toFix;
+            return legLen > 0.5 && along < legLen - 0.1 && remain > 0.2 &&
+                   toFix < 30.0;
+        };
+
+        auto turnAngleDeg = [&](int prevLeg, int nextLeg) {
+            const RouteLeg* prev = route.leg(prevLeg);
+            const RouteLeg* next = route.leg(nextLeg);
+            if (!prev || !next) return 0.0;
+            const RouteWaypoint* a = route.waypoint(prev->firstWpt);
+            const RouteWaypoint* b = route.waypoint(prev->lastWpt);
+            const RouteWaypoint* c = route.waypoint(next->lastWpt);
+            if (!a || !b || !c || !a->posValid || !b->posValid || !c->posValid) {
+                return 0.0;
+            }
+            return std::abs(normalize180(
+                bearingTrue(b->lat, b->lon, c->lat, c->lon) -
+                bearingTrue(a->lat, a->lon, b->lat, b->lon)));
+        };
+
+        int guideLeg = route.activeLeg;
+        int guideNext = route.nextLeg;
+        bool latched = false;
+
+        if (!cfg.lnavTurnLatch) latchedLeg_ = -1;
+
+        // RF legs do not use the sticky turn latch at all.  This is RF-only:
+        // an ordinary LNAV leg keeps exactly the same latch behavior as before.
+        const RouteLeg* activeLegPtr = route.leg(route.activeLeg);
+        const bool activeIsRf = activeLegPtr && activeLegPtr->rfArc;
+        if (activeIsRf) latchedLeg_ = -1;
+
+        // Sticky latch first: keep the corner that is already being flown.
+        if (cfg.lnavTurnLatch && !activeIsRf && latchedLeg_ >= 0 &&
+            route.activeLeg - latchedLeg_ <= 3) {
+            bool rfBetween = false;
+            for (int i = latchedLeg_ + 1;
+                 i <= route.activeLeg && i < route.legCount; ++i) {
+                const RouteLeg* between = route.leg(i);
+                if (between && between->rfArc) {
+                    rfBetween = true;
+                    break;
+                }
+            }
+            if (rfBetween) latchedLeg_ = -1;
+        }
+
+        if (cfg.lnavTurnLatch && !activeIsRf && latchedLeg_ >= 0 &&
+            route.activeLeg - latchedLeg_ <= 3) {
+            double toFix = 0.0;
+            if (legStillAhead(latchedLeg_, &toFix)) {
+                guideLeg = latchedLeg_;
+                guideNext = (latchedLeg_ + 1 < route.legCount) ? latchedLeg_ + 1 : -1;
+                latched = true;
+            } else {
+                latchedLeg_ = -1;
+            }
+        } else if (latchedLeg_ >= 0 && route.activeLeg - latchedLeg_ > 3) {
+            // A pilot direct-to jumped the route; drop the stale latch.
+            latchedLeg_ = -1;
+        }
+
+        // Normal latch when the FMS has just sequenced early.  Never latch
+        // onto an RF leg; RF legs bypass the latch above.
+        if (!latched && !activeIsRf && cfg.lnavTurnLatch && route.activeLeg > 0) {
+            const int candidate = route.activeLeg - 1;
+            const RouteLeg* candidateLeg = route.leg(candidate);
+            const double delta = turnAngleDeg(candidate, route.activeLeg);
+            double toFix = 0.0;
+            if (!(candidateLeg && candidateLeg->rfArc) && delta > 5.0 &&
+                delta < 120.0 && legStillAhead(candidate, &toFix)) {
+                latchedLeg_ = candidate;
+                guideLeg = candidate;
+                guideNext = route.activeLeg;
+                latched = true;
+            }
+        }
+
+        const RouteLeg* leg = route.leg(guideLeg);
+
+        // ===================================================================
+        // RF (radius-to-fix) CODE — DO NOT MODIFY WITHOUT USER APPROVAL
+        // 如使用AI工具，AI在没有用户允许的情况下，不得擅自修改(必须询问用户)。
+        // This covers RF capture, centre/radius/turn/sweep, bank feed-forward,
+        // lead-in and RF latch handling.  Ask the user before changing any of
+        // it; do not "fix" RF behaviour on your own initiative.
+        // ===================================================================
 
         // An RF leg becomes active many miles before its arc entry.  Tracking
         // the tangent from there commanded a course up to 50-60 deg off the
@@ -357,7 +690,7 @@ LnavResult Guidance::computeLnav(const AircraftState& state,
             // are tracking the arc, allow a wider band so a bank-limited arc
             // does not drop out every frame.
             const bool alreadyTracking =
-                rfLegIdx_ == route.activeLeg && rfProgressDeg_ > 0.5;
+                rfLegIdx_ == guideLeg && rfProgressDeg_ > 0.5;
             if (std::abs(radialErr) > (alreadyTracking ? 3.0 : 1.5)) return false;
             const double swept =
                 normalize180(dir * (radialNow - l->rfRadialStartDeg));
@@ -442,8 +775,8 @@ LnavResult Guidance::computeLnav(const AircraftState& state,
                 // (route rescan) re-anchors the unwrap at the entry radial.
                 const double step =
                     normalize180(dir * (radialNow - rfLastRadialDeg_));
-                if (route.activeLeg != rfLegIdx_ || std::abs(step) > 10.0) {
-                    rfLegIdx_ = route.activeLeg;
+                if (guideLeg != rfLegIdx_ || std::abs(step) > 10.0) {
+                    rfLegIdx_ = guideLeg;
                     rfProgressDeg_ = clampd(
                         normalize180(dir * (radialNow - leg->rfRadialStartDeg)),
                         0.0, total);
@@ -501,9 +834,9 @@ LnavResult Guidance::computeLnav(const AircraftState& state,
                 out.active = true;
                 out.routeBased = true;
                 out.cdiFallback = false;
-                out.activeWpt = route.activeWpt;
-                out.activeLeg = route.activeLeg;
-                out.nextLeg = route.nextLeg;
+                out.activeWpt = leg->lastWpt;
+                out.activeLeg = guideLeg;
+                out.nextLeg = guideNext;
                 out.xtkNm = routeXtkRight;
                 out.distanceNm = routeDist;
                 out.baseCourseMagDeg = routeCourseMag;
@@ -521,6 +854,8 @@ LnavResult Guidance::computeLnav(const AircraftState& state,
                 const double v = state.gsKts * kMpsPerKt;
                 const double reqBank = rad2deg(std::atan2(
                     v * v, 9.80665 * leg->rfRadiusNm * kMetersPerNm));
+                out.turnBankDeg = dir * reqBank;
+                out.turnBankValid = true;
                 char note[180];
                 std::snprintf(
                     note, sizeof(note),
@@ -556,7 +891,7 @@ LnavResult Guidance::computeLnav(const AircraftState& state,
 
             // A one-waypoint leg's course is defined by the previous fix.
             if (leg->firstWpt == leg->lastWpt && !rfLeadIn) {
-                startIdx = findPreviousLegEnd(route, route.activeLeg);
+                startIdx = findPreviousLegEnd(route, guideLeg);
             }
 
             // An RF lead-in targets the arc entry fix even when that fix is not
@@ -582,7 +917,8 @@ LnavResult Guidance::computeLnav(const AircraftState& state,
                 double startLon = state.lon;
                 bool syntheticInbound = false;
                 const RouteWaypoint* start = route.waypoint(startIdx);
-                if (start && startIdx != endIdx && start->posValid) {
+                if (start && startIdx != endIdx && start->posValid &&
+                    !placeholderIdent(start->id)) {
                     startLat = start->lat;
                     startLon = start->lon;
                 } else if (rfLeadIn) {
@@ -619,10 +955,45 @@ LnavResult Guidance::computeLnav(const AircraftState& state,
                                           end->lat, end->lon);
                 bool courseFromCdi = false;
 
+                // A synthetic inbound line is rebuilt from the CDI course seen
+                // when the leg started, so a tiny course difference leaves a
+                // steady cross-track against the FMS (live: a constant ~0.4 NM
+                // offset while the CDI showed a different sign).  On these legs
+                // trust the CDI cross-track directly so both references agree;
+                // the route geometry still supplies course and turn
+                // anticipation.
+                if (syntheticInbound && cdi.valid && cdi.xtkValid) {
+                    xtk = -(cdi.signIsCorrection ? cdi.xtkNm
+                                                 : cdiSign_ * cdi.xtkNm);
+                }
+
+                // Corner window: a turn at the active fix makes the FMS CDI
+                // course and distance jump while the aircraft is still on the
+                // inbound side, and the sustained-disagreement check used to
+                // drop the whole leg to GPS CDI exactly when the fly-by arc
+                // needed to run (live: bank fell abruptly right after the fix,
+                // turn progress stayed 0 and 14 frames went to CDI).  Inside
+                // this window the route is trusted and the CDI checks are
+                // skipped.
+                bool cornerWindow = false;
+                {
+                    const RouteLeg* nxt = route.leg(guideNext);
+                    const RouteWaypoint* nEnd =
+                        (nxt && !nxt->complex) ? route.waypoint(nxt->lastWpt)
+                                               : nullptr;
+                    if (nEnd && nEnd->posValid && nxt->lastWpt != endIdx) {
+                        const double nextCourse =
+                            bearingTrue(end->lat, end->lon, nEnd->lat, nEnd->lon);
+                        const double delta =
+                            std::abs(normalize180(nextCourse - courseTrue));
+                        if (delta > 5.0 && dist < 20.0) cornerWindow = true;
+                    }
+                }
+
                 // The FF757's route computation is unreliable on RNP segments,
                 // so an RF lead-in is driven purely by CIFP geometry: no course
                 // anchoring and no CDI validation.
-                if (cdi.valid && !rfLeadIn) {
+                if (cdi.valid && !rfLeadIn && !cornerWindow) {
                     const double dCourse = normalize180(courseMag - cdi.courseMagDeg);
                     const double absCourse = std::abs(dCourse);
                     const double tolerance = std::max(10.0, cdi.distanceNm * 0.5);
@@ -722,7 +1093,7 @@ LnavResult Guidance::computeLnav(const AircraftState& state,
                     updateRnp(cfg, std::abs(xtk),
                               DistanceToDestination(route, endIdx, dist), out);
 
-                    const RouteLeg* next = route.leg(route.nextLeg);
+                    const RouteLeg* next = route.leg(guideNext);
                     double nextCourseTrue = courseTrue;
                     bool haveNext = false;
                     const RouteWaypoint* nextEnd = nullptr;
@@ -779,6 +1150,30 @@ LnavResult Guidance::computeLnav(const AircraftState& state,
                     };
                     double interceptDeg = legIntercept(xtk, dist);
 
+                    // Carry the intercept through the sequencing instant: the
+                    // homing angle collapses when dist jumps to the next leg
+                    // length, which reads as an abrupt reduction in turn.  Carry
+                    // the previous magnitude for at most 3 s (60 frames at
+                    // 20 Hz), decayed linearly, and only while the aircraft is
+                    // still off the new course; the state is keyed to a single
+                    // leg change so legs cannot contaminate each other.
+                    if (lastGuideLeg_ >= 0 && guideLeg != lastGuideLeg_) {
+                        cornerCarryDeg_ = std::abs(lastInterceptDeg_);
+                        cornerCarryFrames_ = 60;
+                    }
+                    lastGuideLeg_ = guideLeg;
+                    if (cornerCarryFrames_ > 0 && std::abs(xtk) > 0.3) {
+                        const double carry =
+                            cornerCarryDeg_ * cornerCarryFrames_ / 60.0;
+                        if (std::abs(interceptDeg) < carry) {
+                            interceptDeg = (xtk >= 0.0 ? -1.0 : 1.0) * carry;
+                        }
+                        --cornerCarryFrames_;
+                    } else {
+                        cornerCarryFrames_ = 0;
+                    }
+                    lastInterceptDeg_ = interceptDeg;
+
                     // No fly-by anticipation during an RF lead-in: the arc is
                     // tangent to the inbound course, so the turn starts exactly
                     // at the entry and the arc itself handles it.
@@ -801,7 +1196,8 @@ LnavResult Guidance::computeLnav(const AircraftState& state,
                             // arc while still `tangent` miles short, LNAV rolled
                             // out immediately and the corner was cut.
                             const double radius =
-                                turnRadiusNm(state.gsKts, cfg.lnavTurnBankDeg);
+                                turnRadiusNm(state.gsKts,
+                                             flyByBankDeg(cfg, state.gsKts));
                             const double tangent =
                                 clampd(radius * std::tan(deg2rad(absDelta * 0.5)) *
                                            cfg.lnavTurnLeadFactor,
@@ -825,6 +1221,23 @@ LnavResult Guidance::computeLnav(const AircraftState& state,
                             const double radialNow =
                                 bearingTrue(cLat, cLon, state.lat, state.lon);
 
+                            // Radial error against the planned fly-by circle
+                            // (+ = outside).  A tangent-only command is open
+                            // loop: when the aircraft banks less than the
+                            // assumed fly-by bank it falls outside the circle;
+                            // with the tangent alone the LNAV bank then stays
+                            // shallow and the turn overshoots the outbound
+                            // course.  asin(error / radius) turns the distance
+                            // off the circle into an extra (or reduced) turn
+                            // angle, which raises the commanded bank until the
+                            // aircraft is back on the planned path.
+                            const double radialErr =
+                                distanceNm(cLat, cLon, state.lat, state.lon) - radius;
+                            const double radialCorrDeg = clampd(
+                                1.5 * rad2deg(std::asin(clampd(
+                                    radialErr / std::max(radius, 0.2), -1.0, 1.0))),
+                                -25.0, 25.0);
+
                             // Remaining distance along the leg (not the straight
                             // line to the fix) so a lateral offset cannot start
                             // the turn early.
@@ -836,11 +1249,15 @@ LnavResult Guidance::computeLnav(const AircraftState& state,
                                                          end->lat, end->lon);
                             const bool onArcZone =
                                 pastFix || remainAlong <= tangent + 0.1;
+                            out.turnRemainNm = remainAlong;
+                            out.turnTangentNm = tangent;
+                            out.turnZone = onArcZone ? 1 : 0;
 
                             if (onArcZone) {
                                 const double arcAngle = clampd(
                                     normalize180(sign * (radialNow - radialStart)),
                                     0.0, absDelta);
+                                out.turnArcDeg = arcAngle;
 
                                 // Roll-out lead: freeze the target on the
                                 // outbound course a few degrees before the arc
@@ -854,6 +1271,14 @@ LnavResult Guidance::computeLnav(const AircraftState& state,
                                     arcAngle /
                                         std::max(1e-6, absDelta - rolloutLead),
                                     0.0, 1.0);
+                                if (arcAngle > 0.0 &&
+                                    arcAngle < absDelta - rolloutLead) {
+                                    const double v = state.gsKts * kMpsPerKt;
+                                    out.turnBankDeg = sign * rad2deg(std::atan2(
+                                        v * v,
+                                        9.80665 * radius * kMetersPerNm));
+                                    out.turnBankValid = true;
+                                }
 
                                 if (arcAngle >= absDelta) {
                                     // Roll-out: track the outbound leg with its
@@ -874,10 +1299,12 @@ LnavResult Guidance::computeLnav(const AircraftState& state,
                                     interceptDeg = 0.0;
                                 } else if (arcAngle > 0.0) {
                                     // On the arc the path itself is the
-                                    // reference: steer the tangent course and
-                                    // add no cross-track intercept, which used
-                                    // to double the turn command.
-                                    desiredTrue = courseTrue + sign * arcAngle;
+                                    // reference: steer the tangent course plus
+                                    // the radial correction, and add no
+                                    // cross-track intercept, which used to
+                                    // double the turn command.
+                                    desiredTrue = courseTrue +
+                                                  sign * (arcAngle + radialCorrDeg);
                                     interceptDeg = 0.0;
                                 } else {
                                     turnProgress = 0.0;
@@ -898,9 +1325,9 @@ LnavResult Guidance::computeLnav(const AircraftState& state,
                     out.active = true;
                     out.routeBased = true;
                     out.cdiFallback = false;
-                    out.activeWpt = route.activeWpt;
-                    out.activeLeg = route.activeLeg;
-                    out.nextLeg = route.nextLeg;
+                    out.activeWpt = leg->lastWpt;
+                    out.activeLeg = guideLeg;
+                    out.nextLeg = guideNext;
                     out.xtkNm = routeXtkRight;
                     out.distanceNm = routeDist;
                     out.baseCourseMagDeg = routeCourseMag;
@@ -923,6 +1350,7 @@ LnavResult Guidance::computeLnav(const AircraftState& state,
                                                            : leg->rfEntryId;
                     }
                     if (courseFromCdi) out.note += " (course from FMS)";
+                    if (latched && !rfLeadIn) out.note += " (leg latch)";
                 }
             }
         }
@@ -1082,18 +1510,139 @@ VnavResult Guidance::computeVnav(const AircraftState& state,
     bool usedAltitude = false;
     const VnavTarget target = FindVnavTarget(route, state, cfg);
     const SpeedTarget spd = FindSpeedTarget(route, state, cfg);
-    // A different altitude target means a different reference profile: restart
-    // the deviation integral instead of carrying it across the sequencing.
-    if (!target.valid || target.index != vnavTargetIndex_) {
-        vnavPathHeld_ = false;
-        vnavPathErrorFt_ = 0.0;
-        vnavTargetIndex_ = target.valid ? target.index : -1;
-    }
-    out.pathErrorFt = vnavPathErrorFt_;
     if (spd.valid) {
         out.targetSpdKt = static_cast<double>(spd.speedKt);
         out.targetSpdDistNm = spd.distanceNm;
         out.targetSpdLeadNm = spd.decelLeadNm;
+    }
+    out.pathErrorFt = vnavPathErrorFt_;
+
+    // Zibo-style vertical profile (opt-in): follow one continuous idle path
+    // built backwards from the last altitude constraint instead of a chord to
+    // the next one.  The legacy path below is left untouched as the fallback.
+    if (cfg.vnavPathProfile) {
+        const VnavProfile profile = BuildVnavProfile(route, state, cfg);
+        if (profile.valid) {
+            double pathAlt = 0.0;
+            double gradientFtPerNm = 0.0;
+            bool pastEnd = false;
+            if (VnavProfileAt(profile, 0.0, &pathAlt, &gradientFtPerNm, &pastEnd)) {
+                if (profile.endWpt != vnavProfileEndWpt_) {
+                    vnavPathHeld_ = false;
+                    vnavPathErrorFt_ = 0.0;
+                    vnavProfileEndWpt_ = profile.endWpt;
+                }
+
+                // The MCP altitude is a floor in a descent.  Clamp the profile
+                // only while the aircraft is above it; an MCP below the
+                // current altitude must never start a dive.
+                const double selectedAlt =
+                    (state.selectedAltFt > 1000.0 && state.selectedAltFt < 60000.0)
+                        ? state.selectedAltFt
+                        : 0.0;
+                bool mcpLimited = false;
+                if (cfg.vnavRespectSelectedAlt && selectedAlt > 0.0 &&
+                    selectedAlt > profile.endAltFt && state.altFt > selectedAlt &&
+                    pathAlt < selectedAlt) {
+                    pathAlt = selectedAlt;
+                    gradientFtPerNm = 0.0;
+                    mcpLimited = true;
+                }
+
+                const double pathDev = state.altFt - pathAlt;  // + above path
+                // Before TOD the idle path is above the aircraft: hold the
+                // cruise altitude until the path intercepts, exactly like the
+                // legacy ROUTE HOLD but using the real profile.
+                const bool beforeTod = !pastEnd && pathDev < -50.0 &&
+                                       std::abs(state.vsFpm) < 200.0;
+                if (beforeTod) {
+                    vnavPathHeld_ = false;
+                    vnavPathErrorFt_ = 0.0;
+                    out.active = true;
+                    out.pathBased = false;
+                    out.passThrough = true;
+                    out.targetAltFt = state.altFt;
+                    out.requiredVsFpm = 0.0;
+                    out.vsErrorFpm = 0.0;
+                    out.correctionDeg = 0.0;
+                    out.source = "ROUTE HOLD";
+                    char note[220];
+                    std::snprintf(note, sizeof(note),
+                                  "before TOD: path %.0f ft here (dev %+.0f ft, %.0f ft/NM)",
+                                  pathAlt, pathDev, gradientFtPerNm);
+                    out.note = note;
+                    return out;
+                }
+
+                const double gs = std::max(state.gsKts, 60.0);
+                double reqVs = gradientFtPerNm * gs / 60.0;
+                reqVs -= cfg.vnavPathDevGain * clampd(pathDev, -1500.0, 1500.0);
+                // Keep the 777 decel lead, but only for a speed target inside
+                // this profile: soften the gradient so the fix is reached at
+                // the published speed without a hard brake.
+                if (spd.valid && spd.decelLeadNm > 0.3 &&
+                    spd.distanceNm <= profile.endDistNm + 1.0 &&
+                    spd.distanceNm <= std::max(5.0, spd.decelLeadNm + 2.0)) {
+                    const double d = std::max(spd.distanceNm, 0.1);
+                    reqVs *= std::max(0.3, d / (d + spd.decelLeadNm));
+                }
+                if (reqVs > 0.0) reqVs = 0.0;   // VNAV PTH never commands a climb
+                reqVs = clampd(reqVs, -cfg.vnavMaxVsFpm, cfg.vnavMaxVsFpm);
+
+                out.active = true;
+                out.targetAltFt = pathAlt;
+                out.requiredVsFpm = reqVs;
+                out.vsErrorFpm = reqVs - state.vsFpm;
+                vnavPathErrorFt_ = pathDev;
+                out.pathErrorFt = pathDev;
+
+                // Same pitch-authority hysteresis as the legacy path: latch on
+                // a real error, release only when both VS and path deviation
+                // are small, so the FF757 cannot take pitch back between
+                // frames and start a tug-of-war.
+                bool holdPitch = vnavPathHeld_;
+                if (holdPitch) {
+                    holdPitch = std::abs(out.vsErrorFpm) >= 80.0 ||
+                                std::abs(pathDev) >= 120.0;
+                } else {
+                    holdPitch = std::abs(out.vsErrorFpm) > 200.0 ||
+                                std::abs(pathDev) > 250.0;
+                }
+                vnavPathHeld_ = holdPitch;
+                out.pathHeld = holdPitch;
+
+                if (!holdPitch) {
+                    out.pathBased = false;
+                    out.passThrough = true;
+                    out.targetAltFt = state.altFt;
+                    out.requiredVsFpm = 0.0;
+                    out.vsErrorFpm = 0.0;
+                    out.correctionDeg = 0.0;
+                    out.source = "FD PASS";
+                    out.note = "path deviation inside deadband; FF757 owns pitch";
+                    return out;
+                }
+
+                double correction = cfg.vnavVsGain * out.vsErrorFpm / 1000.0;
+                correction -= cfg.vnavAccelGain *
+                              clampd(state.vsAccelFpmPerSec, -1000.0, 1000.0);
+                out.correctionDeg = clampd(correction,
+                                           -cfg.vnavMaxCorrectionDeg,
+                                           cfg.vnavMaxCorrectionDeg);
+                out.pathBased = true;
+                out.source = mcpLimited ? "VNAV PATH/MCP" : "VNAV PATH";
+                char note[260];
+                std::snprintf(note, sizeof(note),
+                              "VNAV PATH %.0f ft (dev %+.0f ft, %.0f ft/NM)%s"
+                              " | alt=%.0f gs=%.0f reqVS=%+.0f%s",
+                              pathAlt, pathDev, gradientFtPerNm,
+                              mcpLimited ? " (MCP limited)" : "",
+                              state.altFt, state.gsKts, reqVs,
+                              pastEnd ? " (past E/D)" : "");
+                out.note = note;
+                return out;
+            }
+        }
     }
 
     // Deceleration lead: when the speed constraint's required braking
@@ -1102,6 +1651,14 @@ VnavResult Guidance::computeVnav(const AircraftState& state,
     // the fix at the right speed instead of having to brake hard on the
     // short final.  The same 1 NM / 10 KT factor is used on the pitch side
     // (treating extra deceleration distance as level-out distance).
+    // Legacy target bookkeeping.  Skipped whenever the profile branch above
+    // took over, so a profile descent keeps its own pitch latch.
+    if (!target.valid || target.index != vnavTargetIndex_) {
+        vnavPathHeld_ = false;
+        vnavPathErrorFt_ = 0.0;
+        vnavTargetIndex_ = target.valid ? target.index : -1;
+    }
+    out.pathErrorFt = vnavPathErrorFt_;
     double speedHoldLead = 0.0;
     if (spd.valid && spd.decelLeadNm > 0.0 && target.valid && spd.index == target.index) {
         // Aligned: the altitude target IS the DECEL fix.  Use the decel lead

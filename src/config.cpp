@@ -68,7 +68,15 @@ void Config::clampValues() {
     lnavTurnLeadFactor = std::clamp(lnavTurnLeadFactor, 0.5, 3.0);
     lnavMaxBankDeg = std::clamp(lnavMaxBankDeg, 10.0, 35.0);
     lnavTurnBankDeg = std::clamp(lnavTurnBankDeg, 5.0, 35.0);
+    lnavTurnBankLowKts = std::clamp(lnavTurnBankLowKts, 60.0, 400.0);
+    lnavTurnBankHighKts = std::clamp(lnavTurnBankHighKts, 80.0, 500.0);
+    lnavTurnBankHighDeg = std::clamp(lnavTurnBankHighDeg, 5.0, 35.0);
+    if (lnavTurnBankHighKts <= lnavTurnBankLowKts + 10.0) {
+        lnavTurnBankHighKts = std::min(500.0, lnavTurnBankLowKts + 80.0);
+    }
     lnavMaxCourseErrorDeg = std::clamp(lnavMaxCourseErrorDeg, 20.0, 90.0);
+    lnavL1Factor = std::clamp(lnavL1Factor, 0.0, 4.0);
+    lnavL1MaxDeg = std::clamp(lnavL1MaxDeg, 0.0, 20.0);
     lnavRolloutLeadDeg = std::clamp(lnavRolloutLeadDeg, 0.0, 10.0);
     lnavMinSpeedKts = std::clamp(lnavMinSpeedKts, 30.0, 150.0);
     lnavMinDistanceNm = std::clamp(lnavMinDistanceNm, 0.0, 1.0);
@@ -76,6 +84,14 @@ void Config::clampValues() {
     lnavMaxRollCorrectionDeg = std::clamp(lnavMaxRollCorrectionDeg, 0.0, 15.0);
     lnavRollRateLimitDegPerSec = std::clamp(lnavRollRateLimitDegPerSec, 0.2, 15.0);
     lnavRollSmoothingTauSec = std::clamp(lnavRollSmoothingTauSec, 0.02, 1.0);
+    lnavBankKTrack = std::clamp(lnavBankKTrack, 0.0, 4.0);
+    lnavBankKXtk = std::clamp(lnavBankKXtk, 0.0, 3.0);
+    lnavBankMaxDeg = std::clamp(lnavBankMaxDeg, 5.0, 30.0);
+    lnavBankRateDegPerSec = std::clamp(lnavBankRateDegPerSec, 1.0, 15.0);
+    lnavBankDeadbandDeg = std::clamp(lnavBankDeadbandDeg, 0.0, 3.0);
+    lnavBankDeadbandNm = std::clamp(lnavBankDeadbandNm, 0.0, 0.2);
+    lnavBankFilterTauSec = std::clamp(lnavBankFilterTauSec, 0.0, 1.0);
+    lnavBankTrackRateDamp = std::clamp(lnavBankTrackRateDamp, 0.0, 3.0);
     rnpNm = std::clamp(rnpNm, 0.0, 10.0);
 
     vnavVsGain = std::clamp(vnavVsGain, 0.0, 2.0);
@@ -86,6 +102,8 @@ void Config::clampValues() {
     vnavMaxVsFpm = std::clamp(vnavMaxVsFpm, 200.0, 6000.0);
     vnavMinDistanceNm = std::clamp(vnavMinDistanceNm, 0.0, 2.0);
     vnavMaxAltDeltaFt = std::clamp(vnavMaxAltDeltaFt, 1000.0, 60000.0);
+    vnavPathAngleDeg = std::clamp(vnavPathAngleDeg, 1.0, 6.0);
+    vnavPathDevGain = std::clamp(vnavPathDevGain, 0.0, 3.0);
     cduRescanIntervalSec = std::clamp(cduRescanIntervalSec, 0.0, 600.0);
 
     lnavRollMode = std::clamp(lnavRollMode, -1, 12);
@@ -127,6 +145,10 @@ bool Config::load(const std::string& path) {
         else if (key == "lnav_turn_lead_factor") { if (parseDouble(value, d)) lnavTurnLeadFactor = d; }
         else if (key == "lnav_max_bank_deg") { if (parseDouble(value, d)) lnavMaxBankDeg = d; }
         else if (key == "lnav_turn_bank_deg") { if (parseDouble(value, d)) lnavTurnBankDeg = d; }
+        else if (key == "lnav_turn_bank_low_kt") { if (parseDouble(value, d)) lnavTurnBankLowKts = d; }
+        else if (key == "lnav_turn_bank_high_kt") { if (parseDouble(value, d)) lnavTurnBankHighKts = d; }
+        else if (key == "lnav_turn_bank_high_deg") { if (parseDouble(value, d)) lnavTurnBankHighDeg = d; }
+        else if (key == "lnav_turn_latch") { if (parseBool(value, b)) lnavTurnLatch = b; }
         else if (key == "lnav_max_course_error_deg") { if (parseDouble(value, d)) lnavMaxCourseErrorDeg = d; }
         else if (key == "lnav_rollout_lead_deg") { if (parseDouble(value, d)) lnavRolloutLeadDeg = d; }
         else if (key == "lnav_rf_enabled") { if (parseBool(value, b)) lnavRfEnabled = b; }
@@ -135,6 +157,7 @@ bool Config::load(const std::string& path) {
         else if (key == "lnav_heading_direct") { if (parseBool(value, b)) lnavHeadingDirect = b; }
         else if (key == "lnav_force_cdi") { if (parseBool(value, b)) lnavForceCdi = b; }
         else if (key == "lnav_l1_factor") { if (parseDouble(value, d)) lnavL1Factor = d; }
+        else if (key == "lnav_l1_max_deg") { if (parseDouble(value, d)) lnavL1MaxDeg = d; }
         else if (key == "lnav_track_damp_gain") { if (parseDouble(value, d)) lnavTrackDampGain = d; }
         else if (key == "lnav_track_damp_max_deg") { if (parseDouble(value, d)) lnavTrackDampMaxDeg = d; }
         else if (key == "lnav_min_speed_kts") { if (parseDouble(value, d)) lnavMinSpeedKts = d; }
@@ -143,6 +166,15 @@ bool Config::load(const std::string& path) {
         else if (key == "lnav_max_roll_correction_deg") { if (parseDouble(value, d)) lnavMaxRollCorrectionDeg = d; }
         else if (key == "lnav_roll_rate_limit_deg_s") { if (parseDouble(value, d)) lnavRollRateLimitDegPerSec = d; }
         else if (key == "lnav_roll_smoothing_tau_s") { if (parseDouble(value, d)) lnavRollSmoothingTauSec = d; }
+        else if (key == "lnav_bank_direct") { if (parseBool(value, b)) lnavBankDirect = b; }
+        else if (key == "lnav_bank_k_track") { if (parseDouble(value, d)) lnavBankKTrack = d; }
+        else if (key == "lnav_bank_k_xtk") { if (parseDouble(value, d)) lnavBankKXtk = d; }
+        else if (key == "lnav_bank_max_deg") { if (parseDouble(value, d)) lnavBankMaxDeg = d; }
+        else if (key == "lnav_bank_rate_deg_s") { if (parseDouble(value, d)) lnavBankRateDegPerSec = d; }
+        else if (key == "lnav_bank_deadband_deg") { if (parseDouble(value, d)) lnavBankDeadbandDeg = d; }
+        else if (key == "lnav_bank_deadband_nm") { if (parseDouble(value, d)) lnavBankDeadbandNm = d; }
+        else if (key == "lnav_bank_filter_tau_s") { if (parseDouble(value, d)) lnavBankFilterTauSec = d; }
+        else if (key == "lnav_bank_track_rate_damp") { if (parseDouble(value, d)) lnavBankTrackRateDamp = d; }
         else if (key == "rnp_enabled") { if (parseBool(value, b)) rnpEnabled = b; }
         else if (key == "rnp_nm") { if (parseDouble(value, d)) rnpNm = d; }
         else if (key == "vnav_vs_gain") { if (parseDouble(value, d)) vnavVsGain = d; }
@@ -159,9 +191,13 @@ bool Config::load(const std::string& path) {
         else if (key == "vnav_speed_limits_enabled") { if (parseBool(value, b)) vnavSpeedLimitsEnabled = b; }
         else if (key == "vnav_speed_decel_factor_nm_per_10kt") { if (parseDouble(value, d)) vnavSpeedDecelFactorNmPer10Kt = d; }
         else if (key == "vnav_hard_250_below_ft") { if (parseDouble(value, d)) vnavHard250BelowFt = d; }
+        else if (key == "vnav_path_profile") { if (parseBool(value, b)) vnavPathProfile = b; }
+        else if (key == "vnav_path_angle_deg") { if (parseDouble(value, d)) vnavPathAngleDeg = d; }
+        else if (key == "vnav_path_dev_gain") { if (parseDouble(value, d)) vnavPathDevGain = d; }
         else if (key == "cdu_rescan_interval_s") { if (parseDouble(value, d)) cduRescanIntervalSec = d; }
         else if (key == "cdu_periodic_rescan") { if (parseBool(value, b)) cduPeriodicRescan = b; }
         else if (key == "cdu_scan_on_exec_only") { if (parseBool(value, b)) cduScanOnExecOnly = b; }
+        else if (key == "cifp_procedure_route") { if (parseBool(value, b)) cifpProcedureRoute = b; }
         else if (key == "lnav_roll_mode") { if (parseInt(value, i)) lnavRollMode = i; }
         else if (key == "vnav_pitch_mode_a") { if (parseInt(value, i)) vnavPitchModeA = i; }
         else if (key == "vnav_pitch_mode_b") { if (parseInt(value, i)) vnavPitchModeB = i; }
@@ -214,6 +250,10 @@ bool Config::save(const std::string& path) const {
     out << "lnav_turn_lead_factor=" << lnavTurnLeadFactor << "\n";
     out << "lnav_max_bank_deg=" << lnavMaxBankDeg << "\n";
     out << "lnav_turn_bank_deg=" << lnavTurnBankDeg << "\n";
+    out << "lnav_turn_bank_low_kt=" << lnavTurnBankLowKts << "\n";
+    out << "lnav_turn_bank_high_kt=" << lnavTurnBankHighKts << "\n";
+    out << "lnav_turn_bank_high_deg=" << lnavTurnBankHighDeg << "\n";
+    out << "lnav_turn_latch=" << (lnavTurnLatch ? 1 : 0) << "\n";
     out << "lnav_max_course_error_deg=" << lnavMaxCourseErrorDeg << "\n";
     out << "lnav_rollout_lead_deg=" << lnavRolloutLeadDeg << "\n";
     out << "lnav_rf_enabled=" << (lnavRfEnabled ? 1 : 0) << "\n";
@@ -222,6 +262,7 @@ bool Config::save(const std::string& path) const {
     out << "lnav_heading_direct=" << (lnavHeadingDirect ? 1 : 0) << "\n";
     out << "lnav_force_cdi=" << (lnavForceCdi ? 1 : 0) << "\n";
     out << "lnav_l1_factor=" << lnavL1Factor << "\n";
+    out << "lnav_l1_max_deg=" << lnavL1MaxDeg << "\n";
     out << "lnav_track_damp_gain=" << lnavTrackDampGain << "\n";
     out << "lnav_track_damp_max_deg=" << lnavTrackDampMaxDeg << "\n";
     out << "lnav_min_speed_kts=" << lnavMinSpeedKts << "\n";
@@ -230,6 +271,15 @@ bool Config::save(const std::string& path) const {
     out << "lnav_max_roll_correction_deg=" << lnavMaxRollCorrectionDeg << "\n";
     out << "lnav_roll_rate_limit_deg_s=" << lnavRollRateLimitDegPerSec << "\n";
     out << "lnav_roll_smoothing_tau_s=" << lnavRollSmoothingTauSec << "\n";
+    out << "lnav_bank_direct=" << (lnavBankDirect ? 1 : 0) << "\n";
+    out << "lnav_bank_k_track=" << lnavBankKTrack << "\n";
+    out << "lnav_bank_k_xtk=" << lnavBankKXtk << "\n";
+    out << "lnav_bank_max_deg=" << lnavBankMaxDeg << "\n";
+    out << "lnav_bank_rate_deg_s=" << lnavBankRateDegPerSec << "\n";
+    out << "lnav_bank_deadband_deg=" << lnavBankDeadbandDeg << "\n";
+    out << "lnav_bank_deadband_nm=" << lnavBankDeadbandNm << "\n";
+    out << "lnav_bank_filter_tau_s=" << lnavBankFilterTauSec << "\n";
+    out << "lnav_bank_track_rate_damp=" << lnavBankTrackRateDamp << "\n";
     out << "rnp_enabled=" << (rnpEnabled ? 1 : 0) << "\n";
     out << "rnp_nm=" << rnpNm << "\n\n";
 
@@ -246,11 +296,15 @@ bool Config::save(const std::string& path) const {
     out << "vnav_priority=" << (vnavPriority ? 1 : 0) << "\n";
     out << "vnav_speed_limits_enabled=" << (vnavSpeedLimitsEnabled ? 1 : 0) << "\n";
     out << "vnav_speed_decel_factor_nm_per_10kt=" << vnavSpeedDecelFactorNmPer10Kt << "\n";
-    out << "vnav_hard_250_below_ft=" << vnavHard250BelowFt << "\n\n";
+    out << "vnav_hard_250_below_ft=" << vnavHard250BelowFt << "\n";
+    out << "vnav_path_profile=" << (vnavPathProfile ? 1 : 0) << "\n";
+    out << "vnav_path_angle_deg=" << vnavPathAngleDeg << "\n";
+    out << "vnav_path_dev_gain=" << vnavPathDevGain << "\n\n";
 
     out << "cdu_rescan_interval_s=" << cduRescanIntervalSec << "\n";
     out << "cdu_periodic_rescan=" << (cduPeriodicRescan ? 1 : 0) << "\n";
-    out << "cdu_scan_on_exec_only=" << (cduScanOnExecOnly ? 1 : 0) << "\n\n";
+    out << "cdu_scan_on_exec_only=" << (cduScanOnExecOnly ? 1 : 0) << "\n";
+    out << "cifp_procedure_route=" << (cifpProcedureRoute ? 1 : 0) << "\n\n";
 
     out << "# Undocumented FF757 mode enum values.  Change only if the\n";
     out << "# status window shows that a different value is used on your build.\n";

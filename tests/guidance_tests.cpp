@@ -110,6 +110,23 @@ int main() {
     double radius = turnRadiusNm(400.0, 25.0);
     CHECK(radius > 3.0 && radius < 7.0, "turn radius in a sane range");
 
+    // Fly-by bank schedule: the FF757 limits bank at high speed, so the
+    // assumed bank falls from the low-speed value to a fixed 18 deg.
+    {
+        Config b;
+        b.lnavTurnBankDeg = 25.0;
+        b.lnavTurnBankLowKts = 180.0;
+        b.lnavTurnBankHighKts = 260.0;
+        b.lnavTurnBankHighDeg = 18.0;
+        CHECK_NEAR(flyByBankDeg(b, 140.0), 25.0, 1e-9,
+                   "low groundspeed uses the low-speed bank");
+        CHECK_NEAR(flyByBankDeg(b, 300.0), kFlyByBankHighDeg, 1e-9,
+                   "high groundspeed uses the fixed 18 deg bank");
+        CHECK(flyByBankDeg(b, 220.0) < 25.0 &&
+                  flyByBankDeg(b, 220.0) > kFlyByBankHighDeg,
+              "fly-by bank interpolates with groundspeed");
+    }
+
     Config cfg;
     cfg.lnavMaxCourseErrorDeg = 90.0;
     cfg.vnavSpeedLimitsEnabled = false;   // legacy VNAV path tests run without speed limits
@@ -385,6 +402,137 @@ int main() {
         CHECK(!vn.passThrough, "established descent writes a correction");
         CHECK_NEAR(vn.requiredVsFpm, -2222.2, 20.0, "required VS");
         CHECK_NEAR(vn.correctionDeg, -0.867, 0.05, "VNAV correction from the VS error");
+    }
+
+    // --- VNAV vertical profile (Zibo-style idle path) ---------------------
+    // Two constrained fixes 30 NM apart.  The path is anchored on the last
+    // (CCC 2000 ft) and extended backwards; BBB 5000 ft is far below the idle
+    // 3 deg line, so it becomes a breakpoint.  With the aircraft on the
+    // pre-BBB idle segment the plugin must command the 3 deg gradient, not a
+    // chord to CCC.
+    {
+        Config c = cfg;
+        c.vnavPathProfile = true;
+        c.vnavPathDevGain = 0.0;   // isolate the path gradient
+
+        RouteSnapshot r = MakeRoute();
+        r.wpts[1].altFt = 5000;
+        r.wpts[1].altValid = true;
+        r.wpts[1].altConstraint = AltAt;
+        r.wpts[2].altFt = 2000;
+        r.wpts[2].altValid = true;
+        r.wpts[2].altConstraint = AltAt;
+
+        AircraftState s = MakeState(0.0, 0.5, 90.0);  // 30 NM to BBB
+        s.gsKts = 400.0;
+        s.vsFpm = -1000.0;
+        s.altFt = 14560.0;   // on the 3 deg segment from BBB
+        VnavResult vn = guidance.computeVnav(s, r, c);
+        CHECK(vn.active, "profile VNAV active");
+        CHECK(vn.pathBased, "profile VNAV path based");
+        CHECK(vn.source == "VNAV PATH", "profile source is VNAV PATH");
+        CHECK_NEAR(vn.requiredVsFpm, -2123.0, 20.0,
+                   "profile follows the 3 deg idle gradient");
+        CHECK_NEAR(vn.targetAltFt, 14560.0, 40.0,
+                   "profile altitude at the aircraft");
+        CHECK_NEAR(vn.correctionDeg, -1.348, 0.05,
+                   "profile correction from the VS error");
+    }
+
+    // Before TOD the idle path is above the aircraft: hold altitude and let
+    // the FF757 own pitch instead of starting an early descent.
+    {
+        Config c = cfg;
+        c.vnavPathProfile = true;
+        c.vnavPathDevGain = 0.0;
+
+        RouteSnapshot r = MakeRoute();
+        r.wpts[1].altFt = 5000;
+        r.wpts[1].altValid = true;
+        r.wpts[1].altConstraint = AltAt;
+        r.wpts[2].altFt = 2000;
+        r.wpts[2].altValid = true;
+        r.wpts[2].altConstraint = AltAt;
+
+        AircraftState s = MakeState(0.0, 0.5, 90.0);
+        s.altFt = 12000.0;   // below the path (14560 ft here)
+        s.vsFpm = 0.0;
+        VnavResult vn = guidance.computeVnav(s, r, c);
+        CHECK(vn.active && vn.passThrough, "profile before TOD passes through");
+        CHECK(vn.source == "ROUTE HOLD", "profile before TOD reports ROUTE HOLD");
+        CHECK_NEAR(vn.correctionDeg, 0.0, 1e-9, "profile before TOD writes no pitch");
+    }
+
+    // An "at or below" ceiling changes the breakpoint altitude.  Here 7000B is
+    // above the AT 5000 case, so the idle segment starts higher and the path
+    // at the aircraft is higher, while the local gradient stays 3 deg.
+    {
+        Config c = cfg;
+        c.vnavPathProfile = true;
+        c.vnavPathDevGain = 0.0;
+
+        RouteSnapshot r = MakeRoute();
+        r.wpts[1].altFt = 7000;
+        r.wpts[1].altValid = true;
+        r.wpts[1].altConstraint = AltAtOrBelow;
+        r.wpts[2].altFt = 2000;
+        r.wpts[2].altValid = true;
+        r.wpts[2].altConstraint = AltAt;
+
+        AircraftState s = MakeState(0.0, 0.5, 90.0);
+        s.gsKts = 400.0;
+        s.vsFpm = -1000.0;
+        s.altFt = 16560.0;
+        VnavResult vn = guidance.computeVnav(s, r, c);
+        CHECK(vn.active && vn.pathBased, "profile ceiling path active");
+        CHECK(vn.targetAltFt > 16000.0,
+              "ceiling raises the path compared with the 5000 ft crossing");
+        CHECK_NEAR(vn.requiredVsFpm, -2123.0, 20.0,
+                   "ceiling path keeps the idle gradient");
+    }
+
+    // Sequencing must not throw the flown segment away.  Three NM past BBB,
+    // the path continues on the BBB->CCC chord (-200 ft/NM); without the
+    // passed-fix anchor it would restart at 3 deg from CCC and demand
+    // -2123 fpm instead of -1333 fpm.
+    {
+        Config c = cfg;
+        c.vnavPathProfile = true;
+        c.vnavPathDevGain = 0.0;
+
+        RouteSnapshot r;
+        r.valid = true;
+        r.sourceRoute = true;
+        r.wptCount = 3;
+        r.legCount = 2;
+        r.activeWpt = 2;
+        r.activeLeg = 1;
+        r.nextLeg = 2;
+        r.wpts.resize(3);
+        r.wpts[0].lat = 0.0;  r.wpts[0].lon = 0.4;  r.wpts[0].id = "AAA";
+        r.wpts[1].lat = 0.0;  r.wpts[1].lon = 0.5;  r.wpts[1].id = "BBB";
+        r.wpts[2].lat = 0.5;  r.wpts[2].lon = 0.5;  r.wpts[2].id = "CCC";
+        for (auto& w : r.wpts) w.posValid = true;
+        r.legs.resize(2);
+        r.legs[0] = RouteLeg{0, 0, 1, false};
+        r.legs[1] = RouteLeg{0, 1, 2, false};
+        r.wpts[1].altFt = 8000;
+        r.wpts[1].altValid = true;
+        r.wpts[1].altConstraint = AltAt;
+        r.wpts[2].altFt = 2000;
+        r.wpts[2].altValid = true;
+        r.wpts[2].altConstraint = AltAt;
+
+        AircraftState s = MakeState(0.05, 0.5, 0.0);  // 3 NM past BBB
+        s.gsKts = 400.0;
+        s.vsFpm = -1000.0;
+        s.altFt = 7400.0;
+        VnavResult vn = guidance.computeVnav(s, r, c);
+        CHECK(vn.active && vn.pathBased, "post-sequencing profile active");
+        CHECK_NEAR(vn.targetAltFt, 7400.0, 30.0,
+                   "path keeps the BBB->CCC chord after sequencing");
+        CHECK_NEAR(vn.requiredVsFpm, -1333.0, 25.0,
+                   "post-sequencing gradient is the chord, not 3 deg");
     }
 
     // Implausible low altitude at high altitude must not command a dive.
@@ -793,6 +941,179 @@ int main() {
               "near-fix homing aims at the fix (atan of offset over distance)");
     }
 
+    // A placeholder leg origin ("(500)" from the FF757 private route arrays)
+    // must not define the course.  Live ZSHC RWY25 SUPAR8D: the placeholder
+    // coordinates gave 145 deg against the FMS 234 deg, the sustained CDI
+    // disagreement check fired and LNAV dropped to GPS CDI for the departure.
+    {
+        Guidance gSyn;
+        RouteSnapshot r = MakeRoute();
+        r.wpts[0].posValid = false;
+        r.wpts[0].id = "(500)";
+        r.wpts[0].altFt = 50000;
+        CdiInput cdi;
+        cdi.valid = true;
+        cdi.xtkValid = true;
+        cdi.courseMagDeg = 90.0;
+        cdi.distanceNm = 30.0;
+        cdi.xtkNm = 0.0;
+        AircraftState s = MakeState(0.0, 0.5, 90.0);   // on the 090 course to BBB
+        LnavResult ln = gSyn.computeLnav(s, r, cdi, cfg);
+        CHECK(ln.active && ln.source == "ROUTE/SYNTH",
+              "placeholder leg start uses the FMS course, not GPS CDI");
+        CHECK(!ln.cdiFallback, "placeholder leg start does not fall back to CDI");
+        CHECK_NEAR(ln.baseCourseMagDeg, 90.0, 0.5,
+                   "synthetic inbound keeps the FMS course");
+        CHECK_NEAR(ln.xtkNm, 0.0, 0.2, "synthetic inbound keeps cross-track");
+    }
+
+    // The same placeholder id with a usable position must still be rejected as
+    // a leg origin (the FF757 stores airport reference coordinates there).
+    {
+        Guidance gSyn;
+        RouteSnapshot r = MakeRoute();
+        r.wpts[0].id = "(520)";
+        CdiInput cdi;
+        cdi.valid = true;
+        cdi.xtkValid = true;
+        cdi.courseMagDeg = 90.0;
+        cdi.distanceNm = 30.0;
+        AircraftState s = MakeState(0.0, 0.5, 90.0);
+        LnavResult ln = gSyn.computeLnav(s, r, cdi, cfg);
+        CHECK(ln.source == "ROUTE/SYNTH",
+              "placeholder ident is rejected even with a valid position");
+    }
+
+    // Compromise leg latch: while the FMS has already sequenced to the next
+    // waypoint but the aircraft is still farther out than the fly-by tangent,
+    // keep flying the previous leg instead of chasing the new leg's line with
+    // a 30 deg intercept.
+    {
+        Guidance gSeq;
+        RouteSnapshot r = MakeRoute();
+        r.activeWpt = 2;      // FMS points at CCC already
+        r.activeLeg = 1;
+        r.nextLeg = -1;
+        CdiInput cdi;
+
+        AircraftState before = MakeState(0.0, 0.6, 90.0);   // 24 NM before BBB
+        LnavResult ln = gSeq.computeLnav(before, r, cdi, cfg);
+        CHECK(ln.active && ln.activeLeg == 0,
+              "outside the tangent the previous leg is flown");
+        CHECK_NEAR(ln.baseCourseMagDeg, 90.0, 0.5,
+                   "previous leg course while latched");
+
+        // Inside the corner the previous leg stays latched until the fix is
+        // passed, so its fly-by arc (not a 30 deg intercept) flies the turn.
+        AircraftState inside = MakeState(0.0, 0.95, 90.0);  // 3 NM before BBB
+        LnavResult lnIn = gSeq.computeLnav(inside, r, cdi, cfg);
+        CHECK(lnIn.active && lnIn.activeLeg == 0,
+              "the corner arc owns the turn until the fix is passed");
+
+        AircraftState far = MakeState(0.0, 0.1, 90.0);      // 54 NM before BBB
+        LnavResult lnFar = gSeq.computeLnav(far, r, cdi, cfg);
+        CHECK(lnFar.active && lnFar.activeLeg == 1,
+              "a distant direct-to jump is not latched");
+    }
+
+    // Sticky latch: the FMS can sequence twice inside one high-speed turn
+    // (live HC306 -> HC606 -> SUPAR within 30 s).  The corner being flown must
+    // not be dropped when the second sequence arrives.
+    {
+        Guidance gSticky;
+        RouteSnapshot r;
+        r.valid = true;
+        r.sourceRoute = true;
+        r.wptCount = 4;
+        r.legCount = 4;
+        r.wpts.resize(4);
+        r.wpts[0].lat = 0.0;   r.wpts[0].lon = 0.0;   r.wpts[0].id = "AAA";
+        r.wpts[1].lat = 0.0;   r.wpts[1].lon = 1.0;   r.wpts[1].id = "BBB";
+        r.wpts[2].lat = 0.5;   r.wpts[2].lon = 1.0;   r.wpts[2].id = "CCC";
+        r.wpts[3].lat = 0.5;   r.wpts[3].lon = 1.5;   r.wpts[3].id = "DDD";
+        for (auto& w : r.wpts) w.posValid = true;
+        r.legs.resize(4);
+        r.legs[0] = RouteLeg{0, 0, 0, false};
+        r.legs[1] = RouteLeg{0, 0, 1, false};
+        r.legs[2] = RouteLeg{0, 1, 2, false};
+        r.legs[3] = RouteLeg{0, 2, 3, false};
+        r.activeWpt = 2;
+        r.activeLeg = 2;
+        r.nextLeg = 3;
+
+        CdiInput cdi;
+        AircraftState s = MakeState(0.0, 0.9, 90.0);   // 6 NM before BBB
+        LnavResult ln = gSticky.computeLnav(s, r, cdi, cfg);
+        CHECK(ln.active && ln.activeLeg == 1,
+              "first early sequence latches the inbound leg");
+
+        // Second early sequence while the aircraft is still before BBB.
+        r.activeWpt = 3;
+        r.activeLeg = 3;
+        r.nextLeg = -1;
+        ln = gSticky.computeLnav(s, r, cdi, cfg);
+        CHECK(ln.active && ln.activeLeg == 1,
+              "a second sequence does not drop the corner being flown");
+        CHECK_NEAR(ln.baseCourseMagDeg, 90.0, 0.5,
+                   "sticky latch keeps the inbound course");
+    }
+
+    // Live ZSHC SUPAR8D geometry: the FMS sequenced HC306 -> HC606 4.5 NM
+    // before HC306 at 285 KT.  The plugin must keep the HC307 -> HC306 leg
+    // instead of starting a 30 deg intercept toward the 118 deg outbound leg.
+    {
+        Guidance gLive;
+        RouteSnapshot r;
+        r.valid = true;
+        r.sourceRoute = true;
+        r.wptCount = 6;
+        r.legCount = 6;
+        r.wpts.resize(6);
+        const double lat[6] = {29.996111, 30.125834, 30.089722,
+                               30.023056, 30.088612, 30.256666};
+        const double lon[6] = {120.275002, 120.566391, 120.669724,
+                               120.858055, 120.960281, 121.221664};
+        const char* ids[6] = {"HC307", "HC306", "HC606",
+                              "SUPAR", "OKTUG", "AND"};
+        for (int i = 0; i < 6; ++i) {
+            r.wpts[static_cast<size_t>(i)].lat = lat[i];
+            r.wpts[static_cast<size_t>(i)].lon = lon[i];
+            r.wpts[static_cast<size_t>(i)].id = ids[i];
+            r.wpts[static_cast<size_t>(i)].posValid = true;
+        }
+        r.legs.resize(6);
+        r.legs[0] = RouteLeg{0, 0, 0, false};
+        for (int i = 1; i < 6; ++i) {
+            r.legs[static_cast<size_t>(i)] = RouteLeg{0, i - 1, i, false};
+        }
+        r.activeWpt = 2;      // FMS already points at HC606
+        r.activeLeg = 2;
+        r.nextLeg = 3;
+
+        const double inbound =
+            bearingTrue(lat[0], lon[0], lat[1], lon[1]);
+        double sLat = 0.0, sLon = 0.0;
+        destinationPoint(lat[1], lon[1], normalize360(inbound + 180.0),
+                         4.5, sLat, sLon);
+        AircraftState s = MakeState(sLat, sLon, inbound);
+        s.gsKts = 285.0;
+        CdiInput cdi;
+        LnavResult ln = gLive.computeLnav(s, r, cdi, cfg);
+        CHECK(ln.active && ln.activeLeg == 1,
+              "live HC306 early sequence keeps the inbound leg");
+        CHECK_NEAR(normalize180(ln.baseCourseMagDeg - inbound), 0.0, 1.0,
+                   "live HC306 latch holds the inbound course");
+
+        // The next sequence (SUPAR) arrives during the same turn; the sticky
+        // latch must not drop it.
+        r.activeWpt = 3;
+        r.activeLeg = 3;
+        r.nextLeg = 4;
+        ln = gLive.computeLnav(s, r, cdi, cfg);
+        CHECK(ln.active && ln.activeLeg == 1,
+              "live second sequence does not drop the HC306 corner");
+    }
+
     // Roll-out lead: on the last few degrees of the arc the target is frozen
     // on the outbound course so the AP levels out on course; progress reads
     // 100% while frozen.  Before the freeze window the arc is still tracked.
@@ -802,22 +1123,46 @@ int main() {
         RouteSnapshot r = MakeRoute();          // left turn 090 -> 000 at BBB
         CdiInput cdi;
 
-        // Points on the tangent arc for the configured turn bank (16 deg) and
-        // the 4 deg rollout lead: T2 is 8.13 nm north of BBB, arc start radial
-        // 180, end radial 090.
-        // ~2 deg before the outbound tangent point T2 (inside the 4 deg lead).
-        AircraftState s = MakeState(0.130668, 0.999913, 355.0);
+        // Build points on the tangent arc for the scheduled fly-by bank and
+        // the 4 deg rollout lead: the centre sits R north of the tangent point
+        // (R west of BBB), the arc starts on radial 180 and ends on 090.
+        const double R = turnRadiusNm(400.0, flyByBankDeg(c7, 400.0));
+        const double latC = R / 60.04;
+        const double lonC = 1.0 - R / 60.04;
+        auto arcPoint = [&](double turnedDeg, double& lat, double& lon) {
+            const double radial = deg2rad(180.0 - turnedDeg);   // left turn
+            lat = latC + (R / 60.04) * std::cos(radial);
+            lon = lonC + (R / 60.04) * std::sin(radial) / std::cos(deg2rad(latC));
+        };
+
+        // 3 deg before the outbound tangent point (inside the 4 deg lead).
+        double lat = 0.0, lon = 0.0;
+        arcPoint(87.0, lat, lon);
+        AircraftState s = MakeState(lat, lon, 355.0);
         LnavResult ln = g7.computeLnav(s, r, cdi, c7);
         CHECK(ln.active, "rollout-lead state active");
         CHECK(std::abs(normalize180(ln.desiredCourseMagDeg)) < 0.5,
               "target frozen on the outbound course inside the lead window");
         CHECK(ln.turnProgress >= 0.999, "progress reads complete while frozen");
 
-        AircraftState s2 = MakeState(0.111874, 0.997943, 15.0);   // ~80 deg turned
+        arcPoint(80.0, lat, lon);   // ~80 deg turned
+        AircraftState s2 = MakeState(lat, lon, 15.0);
         ln = g7.computeLnav(s2, r, cdi, c7);
         CHECK(ln.active, "mid-arc state active");
         CHECK(std::abs(normalize180(ln.desiredCourseMagDeg) - 10.0) < 2.5,
               "mid-arc target still follows the tangent course");
+        CHECK(ln.turnBankValid && ln.turnBankDeg < 0.0,
+              "left fly-by arc reports a negative feed-forward bank");
+
+        // Outside the planned circle the radial term must turn further in, so
+        // a bank mismatch cannot cut inside the corner.
+        double outLat = 0.0, outLon = 0.0;
+        destinationPoint(lat, lon, bearingTrue(latC, lonC, lat, lon), 1.0,
+                        outLat, outLon);
+        AircraftState sOut = MakeState(outLat, outLon, 15.0);
+        ln = g7.computeLnav(sOut, r, cdi, c7);
+        CHECK(normalize180(ln.desiredCourseMagDeg - 10.0) < -1.0,
+              "outside the arc the command turns further in");
     }
 
     // --- RNP / ANP monitoring (777 FMC logic) ---

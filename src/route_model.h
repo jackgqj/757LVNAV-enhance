@@ -43,6 +43,7 @@ struct RouteLeg {
     // CIFP database for the airport nearest the leg.  rfArc is true only when
     // every field below is usable; guidance then tracks the arc itself instead
     // of passing the leg through to the FF757's polygonal approximation.
+    // AI POLICY: 如使用AI工具，AI在没有用户允许的情况下，不得擅自修改(必须询问用户)。
     bool rfArc = false;
     double rfRadiusNm = 0.0;
     double rfCenterLat = 0.0;
@@ -64,6 +65,10 @@ struct RouteLeg {
 struct RouteSnapshot {
     bool valid = false;
     bool sourceRoute = false;     // true when the FF757 route datarefs were read
+    // True when a CIFP departure procedure contributed waypoints/legs (the
+    // route may be a merge of the procedure prefix and the FMS route).
+    bool procedureAssisted = false;
+    std::string procedureId;
     std::string validationError;
 
     int legCount = 0;
@@ -83,6 +88,8 @@ struct RouteSnapshot {
     void clear() {
         valid = false;
         sourceRoute = false;
+        procedureAssisted = false;
+        procedureId.clear();
         validationError.clear();
         legCount = 0;
         wptCount = 0;
