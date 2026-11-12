@@ -14,7 +14,7 @@
 
 当前版本：**v1.2.36+vnav-profile+lnav-turn+cifp-nav+rnav1-bank**（完整更新见 [`CHANGELOG.md`](CHANGELOG.md)；发布说明见 [`RELEASE_NOTES.md`](RELEASE_NOTES.md)）
 
-> ## ⚠️ 使用前必做 / BEFORE FIRST USE
+> ## ⚠️ 使用前必做 / BEFORE USE
 >
 > **必须把至少一部 CDU 停在 `LEGS` 页面（优先右 CDU）；否则插件无法扫描航路，LNAV 增强不会生效。**
 >
