@@ -18,6 +18,13 @@
 > and status fields are defined by [`README.md`](../README.md),
 > [`CONFIG.md`](CONFIG.md) and [`RELEASE_NOTES.md`](../RELEASE_NOTES.md).
 
+> **DIR 使用限制**：使用 FMS `DIR` / 直飞前，必须把 LNAV 数据源切换为
+> **GPS CDI**，并保持到下一个航点；本插件不自动检测 DIR。
+>
+> **DIR limitation:** before using FMS `DIR` / direct-to, switch the LNAV source
+> to **GPS CDI** and keep it there until the next waypoint.  The plugin does not
+> auto-detect DIR.
+
 ---
 
 # 一、中文使用说明

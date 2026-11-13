@@ -950,32 +950,9 @@ LnavResult Guidance::computeLnav(const AircraftState& state,
                 double courseTrue = bearingTrue(startLat, startLon, end->lat, end->lon);
                 double courseMag = magneticFromTrue(courseTrue, state.magVarDeg);
 
-                // FMS direct-to: the CDI course is the bearing from the
-                // aircraft to the active fix, while the route's leg course is
-                // still the old fix-to-fix line.  Trust the direct bearing and
-                // zero the cross-track instead of applying a 30 deg intercept
-                // to the old line (live: BERRY direct-to turned the wrong way).
-                bool directTo = false;
-                if (cdi.valid && !rfLeadIn && startIdx != endIdx) {
-                    const double cdiTrue =
-                        trueFromMagnetic(cdi.courseMagDeg, state.magVarDeg);
-                    const double bearingToFix =
-                        bearingTrue(state.lat, state.lon, end->lat, end->lon);
-                    if (std::abs(normalize180(cdiTrue - bearingToFix)) < 4.0 &&
-                        std::abs(normalize180(cdiTrue - courseTrue)) > 4.0) {
-                        directTo = true;
-                        courseTrue = bearingToFix;
-                        courseMag = magneticFromTrue(courseTrue, state.magVarDeg);
-                        startLat = state.lat;
-                        startLon = state.lon;
-                    }
-                }
-
-                double xtk = directTo
-                                 ? 0.0
-                                 : crossTrackNm(state.lat, state.lon,
-                                                startLat, startLon,
-                                                end->lat, end->lon);
+                double xtk = crossTrackNm(state.lat, state.lon,
+                                          startLat, startLon,
+                                          end->lat, end->lon);
                 bool courseFromCdi = false;
 
                 // A synthetic inbound line is rebuilt from the CDI course seen
@@ -1129,7 +1106,6 @@ LnavResult Guidance::computeLnav(const AircraftState& state,
                             haveNext = true;
                         }
                     }
-
                     // A fix is behind the aircraft when its bearing has flipped
                     // past 90 deg from the inbound course.  Direction-based, so
                     // it also works for a synthetic inbound leg.

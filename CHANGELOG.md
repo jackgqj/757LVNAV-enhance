@@ -53,11 +53,9 @@ RNAV1 direct-bank lateral mode.  Bilingual release notes:
   non-zero vertical speed used to let a backwards-extrapolated path altitude
   (e.g. 65540 ft) become the PTH target; the target now stays at the aircraft
   altitude until the path intercepts.
-- FMS direct-to detection: when the CDI course is the bearing from the
-  aircraft to the active fix and differs from the old fix-to-fix leg, guidance
-  follows that bearing with zero cross-track instead of applying a 30 deg
-  intercept to the previous leg.
-- Tests: bank 8, procedure 25, procedure-route 16, guidance 229, CDU 48,
+- Removed automatic FMS DIR detection.  Before using DIR, switch the LNAV
+  source to GPS CDI and keep it until the next waypoint; then return to ROUTE.
+- Tests: bank 8, procedure 25, procedure-route 16, guidance 226, CDU 48,
   CIFP 21.
 
 ## 1.2.36+vnav-profile+lnav-turn+cifp-nav — 2026-11-12

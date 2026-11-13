@@ -1,10 +1,5 @@
 # 757 LNAV/VNAV Plus
 
-**WARNING: BEFORE YOU USE DIR,PLEASE CHANGE navdata to GPS CDI.After next points,change it to route.**
-<img width="113" height="11" alt="5e38297ce039d9bab4be84a536eb1ca6" src="https://github.com/user-attachments/assets/254c1ec1-0eba-4396-acac-f138c47ecfda" />
-
-**Before ILS,please idle LNAV enhance**
-
 > **Experimental CIFP + RNAV1 repository.** This tree is a copy of the stable
 > 1.2.36+vnav-profile plugin used to prototype CIFP-only departure-procedure
 > parsing and the direct-bank RNAV1 lateral mode.  ARINC 424 sequences come
@@ -23,7 +18,11 @@
 >
 > **必须把至少一部 CDU 停在 `LEGS` 页面（优先右 CDU）；否则插件无法扫描航路，LNAV 增强不会生效。**
 >
+> **使用 FMS `DIR`（直飞）前，必须把 LNAV 数据源切换为 `GPS CDI`，并保持到下一个航点；本插件不自动检测 DIR。**
+>
 > **At least one CDU must be on the `LEGS` page before flight (right CDU preferred). Without it the route scanner cannot read the flight plan and the LNAV enhancement will stay idle.**
+>
+> **Before using FMS `DIR` (direct-to), switch the LNAV source to `GPS CDI` and keep it there until the next waypoint; the plugin does not auto-detect DIR.**
 
 **目录**： [中文](#中文) | [English](#english)
 
