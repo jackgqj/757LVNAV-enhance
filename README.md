@@ -1,5 +1,10 @@
 # 757 LNAV/VNAV Plus
 
+**WARNING: BEFORE YOU USE DIR,PLEASE CHANGE navdata to GPS CDI.After next points,change it to route.**
+<img width="113" height="11" alt="5e38297ce039d9bab4be84a536eb1ca6" src="https://github.com/user-attachments/assets/254c1ec1-0eba-4396-acac-f138c47ecfda" />
+
+**Before ILS,please idle LNAV enhance**
+
 > **Experimental CIFP + RNAV1 repository.** This tree is a copy of the stable
 > 1.2.36+vnav-profile plugin used to prototype CIFP-only departure-procedure
 > parsing and the direct-bank RNAV1 lateral mode.  ARINC 424 sequences come
