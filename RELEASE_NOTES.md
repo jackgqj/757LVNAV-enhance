@@ -41,7 +41,7 @@ LNAV/VNAV 监督层，并加入：
    - `lnav_bank_direct=1`（默认）：写绝对 `flight_director_roll`，并保持
      `override_flightdir_roll=1`；
    - 坡度 = 航迹误差 + 偏航距，限 25°，指令速率 6°/s；
-   - 0.5°/0.02 NM 死区、0.10 s 低通、0.5 航迹转率阻尼；
+   - 0.5°/0.02 NM 死区、0.08 s 低通、0.5 航迹转率阻尼；
    - fly-by / RF 圆弧提供坡度前馈；
    - 前馈符号与当前目标航向误差相反时，本帧不使用前馈（`ff=0`）；
    - FD 滚转不可写时自动回退到航向直写。
@@ -57,6 +57,18 @@ LNAV/VNAV 监督层，并加入：
    - `LNAV servo` 日志新增 `bankCmd`、`tb`（前馈坡度）、`ff`（是否使用前馈）、
      `tz`、`rem`、`tan`、`arc`。
 
+5. **性能**
+   - CIFP 成功合并后按航路签名永久缓存；
+   - 只有检测失败才每 5 s 重试，避免离场阶段周期性重复 detect/build/merge。
+
+6. **VNAV 修正**
+   - 剖面路径在飞机上方时，不再因为垂直速度非零而把外推高度（如 65540 ft）
+     当成 PTH 目标；targetAlt 保持在飞机当前高度直到路径交汇。
+
+7. **FMS 直飞**
+   - 识别 CDI 直飞方位：当 CDI 航向等于“飞机→活动航点”方位、且与旧
+     fix-to-fix 航段不同，按直飞方位飞，偏航距归零，不再对旧航段做 30° 截获。
+
 ### 默认配置
 
 ```ini
@@ -71,7 +83,7 @@ lnav_bank_max_deg=25
 lnav_bank_rate_deg_s=6
 lnav_bank_deadband_deg=0.5
 lnav_bank_deadband_nm=0.02
-lnav_bank_filter_tau_s=0.10
+lnav_bank_filter_tau_s=0.08
 lnav_bank_track_rate_damp=0.5
 cifp_procedure_route=1
 ```
@@ -92,7 +104,7 @@ cifp_procedure_route=1
 离线测试：
 
 ```text
-guidance          223 checks
+guidance          229 checks
 bank                8 checks
 procedure          25 checks
 procedure-route    16 checks
@@ -151,7 +163,7 @@ stable release. It keeps the existing LNAV/VNAV supervisory layer and adds:
    - `lnav_bank_direct=1` (default): writes absolute `flight_director_roll`
      with `override_flightdir_roll=1`;
    - bank = track error + cross-track, capped at 25°, slewed at 6°/s;
-   - 0.5° / 0.02 NM deadband, 0.10 s low-pass, 0.5 track-rate damping;
+   - 0.5° / 0.02 NM deadband, 0.08 s low-pass, 0.5 track-rate damping;
    - fly-by/RF arcs provide bank feed-forward;
    - feed-forward is ignored for the frame when its sign opposes the current
      target-course error (`ff=0`);
@@ -168,6 +180,23 @@ stable release. It keeps the existing LNAV/VNAV supervisory layer and adds:
    - `LNAV servo` logs `bankCmd`, `tb` (feed-forward bank), `ff` (used or not),
      `tz`, `rem`, `tan`, `arc`.
 
+5. **Performance**
+   - a successful CIFP merge is cached for the lifetime of its route signature;
+   - only failed detections retry every 5 s, removing the periodic
+     detect/build/merge hitch during departure.
+
+6. **VNAV correction**
+   - when the profile path is above the aircraft, a non-zero vertical speed no
+     longer lets a backwards-extrapolated altitude (e.g. 65540 ft) become the
+     PTH target; `targetAlt` stays at the current altitude until the path
+     intercepts.
+
+7. **FMS direct-to**
+   - recognises the CDI direct bearing: when the CDI course equals the
+     aircraft→active-fix bearing and differs from the old fix-to-fix leg,
+     guidance follows that bearing with zero cross-track instead of applying a
+     30° intercept to the previous leg.
+
 ### Defaults
 
 ```ini
@@ -182,7 +211,7 @@ lnav_bank_max_deg=25
 lnav_bank_rate_deg_s=6
 lnav_bank_deadband_deg=0.5
 lnav_bank_deadband_nm=0.02
-lnav_bank_filter_tau_s=0.10
+lnav_bank_filter_tau_s=0.08
 lnav_bank_track_rate_damp=0.5
 cifp_procedure_route=1
 ```
@@ -201,7 +230,7 @@ Full reference: [`docs/CONFIG.md`](docs/CONFIG.md).
 ### Validation
 
 ```text
-guidance          223 checks
+guidance          229 checks
 bank                8 checks
 procedure          25 checks
 procedure-route    16 checks
@@ -235,6 +264,6 @@ the plugin folder. The stable plugin remains in `E:\FF757 enhance`.
 
 ---
 
-**Binary SHA256:** `4EFF7E63FF05B19E7B77F4C19D750642CF2FB410CABC6ADCD44D5EC1C1C4BCD6`  
+**Binary SHA256:** `2B6AAA72694B03E2665568A5EDAD241885981A116B61514407DB671E2EE11CA9`  
 **License:** MIT, author credit **JACKGONG** required. See [`LICENSE`](LICENSE)
 and [`NOTICE.md`](NOTICE.md).

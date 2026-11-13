@@ -950,9 +950,32 @@ LnavResult Guidance::computeLnav(const AircraftState& state,
                 double courseTrue = bearingTrue(startLat, startLon, end->lat, end->lon);
                 double courseMag = magneticFromTrue(courseTrue, state.magVarDeg);
 
-                double xtk = crossTrackNm(state.lat, state.lon,
-                                          startLat, startLon,
-                                          end->lat, end->lon);
+                // FMS direct-to: the CDI course is the bearing from the
+                // aircraft to the active fix, while the route's leg course is
+                // still the old fix-to-fix line.  Trust the direct bearing and
+                // zero the cross-track instead of applying a 30 deg intercept
+                // to the old line (live: BERRY direct-to turned the wrong way).
+                bool directTo = false;
+                if (cdi.valid && !rfLeadIn && startIdx != endIdx) {
+                    const double cdiTrue =
+                        trueFromMagnetic(cdi.courseMagDeg, state.magVarDeg);
+                    const double bearingToFix =
+                        bearingTrue(state.lat, state.lon, end->lat, end->lon);
+                    if (std::abs(normalize180(cdiTrue - bearingToFix)) < 4.0 &&
+                        std::abs(normalize180(cdiTrue - courseTrue)) > 4.0) {
+                        directTo = true;
+                        courseTrue = bearingToFix;
+                        courseMag = magneticFromTrue(courseTrue, state.magVarDeg);
+                        startLat = state.lat;
+                        startLon = state.lon;
+                    }
+                }
+
+                double xtk = directTo
+                                 ? 0.0
+                                 : crossTrackNm(state.lat, state.lon,
+                                                startLat, startLon,
+                                                end->lat, end->lon);
                 bool courseFromCdi = false;
 
                 // A synthetic inbound line is rebuilt from the CDI course seen
@@ -1552,9 +1575,11 @@ VnavResult Guidance::computeVnav(const AircraftState& state,
                 const double pathDev = state.altFt - pathAlt;  // + above path
                 // Before TOD the idle path is above the aircraft: hold the
                 // cruise altitude until the path intercepts, exactly like the
-                // legacy ROUTE HOLD but using the real profile.
-                const bool beforeTod = !pastEnd && pathDev < -50.0 &&
-                                       std::abs(state.vsFpm) < 200.0;
+                // legacy ROUTE HOLD but using the real profile.  Do not gate
+                // this on |VS| < 200: a climb or a small vertical-speed
+                // transient used to let a backwards-extrapolated profile
+                // altitude (e.g. 65540 ft) through as the PTH target.
+                const bool beforeTod = !pastEnd && pathDev < -50.0;
                 if (beforeTod) {
                     vnavPathHeld_ = false;
                     vnavPathErrorFt_ = 0.0;

@@ -181,6 +181,7 @@ void RouteReader::reset() {
     cifpChecked_ = false;
     cifpRouteSignature_.clear();
     cifpNote_.clear();
+    lastCduRouteSignature_.clear();
     lastCifpAttempt_ = -1000.0;
     lastFullRefresh_ = -1000.0;
     lastBindAttempt_ = -1000.0;
@@ -367,13 +368,25 @@ void RouteReader::refresh(double elapsedSeconds, bool force) {
     if (!hasRouteDatarefs()) {
         const RouteSnapshot& cduRoute = cdu_.route();
         if (cduRoute.valid) {
-            route_ = cduRoute;
-            report_ = "CDU LEGS";
-            lastError_ = cdu_.lastError();
-            captureBaseRoute();
+            const std::string cduSig = routeSignature(cduRoute);
+            if (!route_.valid || cduSig != lastCduRouteSignature_) {
+                route_ = cduRoute;
+                report_ = "CDU LEGS";
+                lastError_ = cdu_.lastError();
+                captureBaseRoute();
+                lastCduRouteSignature_ = cduSig;
+            } else {
+                // Content and active index unchanged: keep the existing
+                // (possibly CIFP-merged) route rather than copying it every
+                // frame.
+                lastError_ = cdu_.lastError();
+            }
         } else if (!route_.valid || !route_.sourceRoute) {
             route_.clear();
             lastError_ = cdu_.lastError();
+            lastCduRouteSignature_.clear();
+        } else {
+            lastCduRouteSignature_.clear();
         }
         return;
     }
@@ -465,9 +478,12 @@ void RouteReader::applyCifpProcedure(double lat, double lon, bool enabled,
     if (baseRoute_.activeWpt > 6) return;
 
     const std::string sig = routeSignature(baseRoute_);
-    if (cifpChecked_ && sig == cifpRouteSignature_ &&
-        elapsedSeconds - lastCifpAttempt_ < 5.0) {
-        return;
+    if (cifpChecked_ && sig == cifpRouteSignature_) {
+        // A successful merge is cached for the lifetime of this route
+        // signature.  Re-running detect/build/merge every 5 s caused a
+        // periodic main-thread hitch; only failures are retried on the timer.
+        if (hasMergedRoute_) return;
+        if (elapsedSeconds - lastCifpAttempt_ < 5.0) return;
     }
     cifpRouteSignature_ = sig;
     cifpChecked_ = true;

@@ -86,6 +86,9 @@ private:
     std::string cifpRouteSignature_;
     std::string cifpNote_;
     std::string lastCifpLog_;
+    // Last CDU route signature copied into route_/baseRoute_.  Avoids copying
+    // the whole snapshot every frame when the CDU content has not changed.
+    std::string lastCduRouteSignature_;
     double lastCifpAttempt_ = -1000.0;
     std::string report_;
     std::string lastError_;

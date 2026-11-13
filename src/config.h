@@ -120,7 +120,7 @@ struct Config {
     // straight into the bank target.
     double lnavBankDeadbandDeg = 0.5;
     double lnavBankDeadbandNm = 0.02;
-    double lnavBankFilterTauSec = 0.10;
+    double lnavBankFilterTauSec = 0.08;
     // Mild track-rate damping: oppose a developing turn rate so a large
     // capture does not keep 25 deg of bank past the course.
     double lnavBankTrackRateDamp = 0.5;

@@ -134,6 +134,27 @@ int main() {
           cfg.vnavPitchModeC == 5, "observed VNAV pitch modes are enabled");
     Guidance guidance;
 
+    // FMS direct-to: the CDI course points from the aircraft to BBB, while the
+    // route leg still points AAA->BBB.  The guidance must follow the direct
+    // bearing (101 deg) instead of the old leg's 30 deg intercept (~120 deg).
+    {
+        RouteSnapshot r = MakeRoute();
+        AircraftState s = MakeState(0.1, 0.5, 101.0);
+        CdiInput cdi;
+        cdi.valid = true;
+        cdi.xtkValid = true;
+        cdi.courseMagDeg = 101.0;
+        cdi.distanceNm = 30.0;
+        cdi.xtkNm = 0.0;
+        cdi.fromTo = 1;
+        LnavResult ln = guidance.computeLnav(s, r, cdi, cfg);
+        CHECK(ln.active && ln.routeBased, "direct-to remains route based");
+        CHECK_NEAR(ln.desiredCourseMagDeg, 101.0, 2.0,
+                   "direct-to follows the CDI bearing, not the old leg intercept");
+        CHECK_NEAR(ln.xtkNm, 0.0, 0.02,
+                   "direct-to has no cross-track against its own bearing line");
+    }
+
     // Route-based LNAV: left of the 090 course, so the target must turn right.
     {
         RouteSnapshot r = MakeRoute();
@@ -461,6 +482,33 @@ int main() {
         CHECK(vn.active && vn.passThrough, "profile before TOD passes through");
         CHECK(vn.source == "ROUTE HOLD", "profile before TOD reports ROUTE HOLD");
         CHECK_NEAR(vn.correctionDeg, 0.0, 1e-9, "profile before TOD writes no pitch");
+    }
+
+    // A non-zero vertical speed must not bypass the before-TOD hold.  A
+    // backwards-extrapolated profile altitude (the live 65540 ft case) must not
+    // become the PTH target while the path is still above the aircraft.
+    {
+        Config c = cfg;
+        c.vnavPathProfile = true;
+        c.vnavPathDevGain = 0.0;
+
+        RouteSnapshot r = MakeRoute();
+        r.wpts[1].altFt = 5000;
+        r.wpts[1].altValid = true;
+        r.wpts[1].altConstraint = AltAt;
+        r.wpts[2].altFt = 2000;
+        r.wpts[2].altValid = true;
+        r.wpts[2].altConstraint = AltAt;
+
+        AircraftState s = MakeState(0.0, 0.5, 90.0);
+        s.altFt = 12000.0;
+        s.vsFpm = 500.0;   // climbing / transient, path still above
+        VnavResult vn = guidance.computeVnav(s, r, c);
+        CHECK(vn.active && !vn.pathBased,
+              "profile before TOD holds with non-zero vertical speed");
+        CHECK_NEAR(vn.targetAltFt, 12000.0, 1.0,
+                   "before-TOD target stays at the aircraft altitude");
+        CHECK(vn.source == "ROUTE HOLD", "non-zero VS still reports ROUTE HOLD");
     }
 
     // An "at or below" ceiling changes the breakpoint altitude.  Here 7000B is

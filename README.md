@@ -14,7 +14,7 @@
 
 当前版本：**v1.2.36+vnav-profile+lnav-turn+cifp-nav+rnav1-bank**（完整更新见 [`CHANGELOG.md`](CHANGELOG.md)；发布说明见 [`RELEASE_NOTES.md`](RELEASE_NOTES.md)）
 
-> ## ⚠️ 使用前必做 / BEFORE USE
+> ## ⚠️ 使用前必做 / BEFORE FIRST USE
 >
 > **必须把至少一部 CDU 停在 `LEGS` 页面（优先右 CDU）；否则插件无法扫描航路，LNAV 增强不会生效。**
 >
@@ -33,7 +33,7 @@
 - **LNAV 转弯与截获**：Boeing 式捕获——|XTK| ≥ 2.5 NM 时固定 30° 截获，以内按 `atan(xtk/dist)` 直飞修正；按地速与坡度限制计算提前转弯；航向锚定仅在 FMS 与自算航向差 ≤8° 时使用；CDI 校验需连续 ~2 s 不一致才降级，并有 `ROUTE HOLD` 兜底。
 - **航点识别**：以 CDU LEGS 第 1 页第 1 行为"下一个航点"，双向校正索引；辅以 FF757 `AirnavDis/AirnavBrg` 同步与沿航迹投影排序。RF 标注只在（入口→终点）在程序库中确为 RF 对时才成立，不会把别的 SID 的弧套到直飞段。
 - **CIFP 离场程序补全**：按航路前几个航点自动匹配最近机场（60 NM 内）的 CIFP SID；如果 CDU 路由从程序中间开始，允许 2 个航点且位于程序末尾的后缀匹配。程序航段、RF 圆弧和坐标在第一个公共航点处接回 FMS 航路；`cifp_procedure_route=0` 可关闭。CIFP 无跑道入口坐标，且跑道过渡与公共航段仍是分开的 CIFP 块，离场起始段可能从第一个可解析航点开始。
-- **RNAV1 直接滚转**：`lnav_bank_direct=1`（默认）由插件写绝对 FD 滚转角，而不是只给航向目标；坡度按航迹误差 + 偏航距计算，限 25°，指令速率 6°/s，带 0.5°/0.02 NM 死区、0.10 s 低通和 0.5 的航迹转率阻尼。fly-by / RF 圆弧有坡度前馈；前馈符号与当前目标航向误差相反时本帧不使用，避免 IDBON 那类“前馈压住飞机、航迹卡死”。菜单 **LNAV bank direct (RNAV1)** 可开关。RF 段不使用普通 LNAV 的路段锁存。
+- **RNAV1 直接滚转**：`lnav_bank_direct=1`（默认）由插件写绝对 FD 滚转角，而不是只给航向目标；坡度按航迹误差 + 偏航距计算，限 25°，指令速率 6°/s，带 0.5°/0.02 NM 死区、0.08 s 低通和 0.5 的航迹转率阻尼。fly-by / RF 圆弧有坡度前馈；前馈符号与当前目标航向误差相反时本帧不使用，避免 IDBON 那类“前馈压住飞机、航迹卡死”。菜单 **LNAV bank direct (RNAV1)** 可开关。RF 段不使用普通 LNAV 的路段锁存。
 - **VNAV 垂直路径**：按约束高度/垂直路径计算所需升降率，叠加垂直加速度阻尼，经低通与限速率写入 FD 俯仰；VNAV SPD（爬升/控速）阶段完全透传。下降（DES）时插件锁定俯仰优先权（`vnav_priority`），消除与机模 VNAV 的逐帧"夺权"。CDU 高度限定符按 `A`（at or above）/ `B`（at or below）/ 无后缀（at）分别处理：已满足的 at-or-above 下限不再被当成下降目标，但仍限制下降坡度，避免提前跌破限制。
 - **VNAV 速度限制**：自动处理 250 KT / 10000 ft 硬限制，并按 1 NM / 10 KT 计算减速提前量（`vnav_speed_limits_enabled` 可关）；自动 250 KT 只在进入减速窗口后激活，不会在巡航高度提前几十海里点亮。
 - **RNP / ANP 监控**：按飞行阶段给出 RNP（巡航 2.0 / 终端 1.0 / 最后进近 0.3 NM），`ANP(trk)` 为航迹保持误差代理量；持续超限约 2 s 显示 `NAV UNABLE RNP` 并写日志（仅提示，不干预操纵）。
@@ -145,7 +145,7 @@ X-Plane 12/Output/757LVNAVPlus.log
 - **LNAV** 开启：改善航向跟踪、提前转弯与 RF 弧。
 - **VNAV** 开启：小幅垂直路径修正 + FD 俯仰平滑。
 - **VNAV smoothing** 开启：无垂直路径时只平滑 FD 俯仰基线（不做修正）。
-- **直滚默认开启**（`lnav_bank_direct=1`）：写绝对 FD 滚转角，限 25°、速率 6°/s、低通 0.10 s、转率阻尼 0.5；FD 滚转不可写时自动回退到航向直写。`lnav_heading_direct=0` 则直飞段交还机模、override 只用于 RF 段；`lnav_rf_nav_override=0` 让 RF 段退回 ±4° FD 滚转；`lnav_rf_enabled=0` 则 RF 段完全透传。
+- **直滚默认开启**（`lnav_bank_direct=1`）：写绝对 FD 滚转角，限 25°、速率 6°/s、低通 0.08 s、转率阻尼 0.5；FD 滚转不可写时自动回退到航向直写。`lnav_heading_direct=0` 则直飞段交还机模、override 只用于 RF 段；`lnav_rf_nav_override=0` 让 RF 段退回 ±4° FD 滚转；`lnav_rf_enabled=0` 则 RF 段完全透传。
 - **CIFP 离场覆盖**默认开启（`cifp_procedure_route=1`）；不匹配时自动使用原始 FMS 航路。
 - 地面、AP 断开、未识别到导航/垂直模式、航路或 CDI 无效时自动待命。
 
@@ -162,7 +162,7 @@ X-Plane 12/Output/757LVNAVPlus.log
 | RF 坡度前馈 | 按 `atan(V²/(gR))`，方向与目标航向误差相反时本帧禁用 |
 | 直滚坡度上限 | 25° |
 | 直滚指令速率 | 6°/s |
-| 直滚低通 / 死区 | 0.10 s；0.5° / 0.02 NM |
+| 直滚低通 / 死区 | 0.08 s；0.5° / 0.02 NM |
 | 直滚转率阻尼 | 0.5°/（°/s），上限 6° |
 | VNAV 俯仰修正 | ±2.5° |
 | VNAV 俯仰变化率 | 3°/s |
@@ -347,7 +347,7 @@ layer** on top of the aircraft's own autopilot.
   departure leg may start at the first resolved fix.
 - **RNAV1 direct bank**: `lnav_bank_direct=1` (default) writes an absolute FD
   roll target from track error + cross-track, capped at 25°, slewed at 6°/s,
-  with a 0.5° / 0.02 NM deadband, 0.10 s low-pass and 0.5 track-rate damping.
+  with a 0.5° / 0.02 NM deadband, 0.08 s low-pass and 0.5 track-rate damping.
   Fly-by/RF arcs publish a bank feed-forward; it is rejected when its sign
   opposes the current target-course error. Menu **LNAV bank direct (RNAV1)**
   toggles it.
@@ -534,7 +534,7 @@ Delete the config file to restore defaults.
 - **VNAV** enabled: small vertical-path correction plus FD pitch smoothing.
 - **VNAV smoothing** enabled: filters the FD pitch baseline when no path exists.
 - **Direct bank** enabled (`lnav_bank_direct=1`): absolute FD roll target,
-  25° cap, 6°/s slew, 0.10 s low-pass, 0.5 track-rate damping. Falls back to
+  25° cap, 6°/s slew, 0.08 s low-pass, 0.5 track-rate damping. Falls back to
   heading-direct when FD roll is not writable. `lnav_heading_direct=0` hands
   straight legs back to the FF757 and keeps the override RF-only;
   `lnav_rf_nav_override=0` uses the ±4° FD-roll path on RF;
@@ -557,7 +557,7 @@ Delete the config file to restore defaults.
 | RF bank feed-forward | `atan(V²/(gR))`; suppressed when its sign opposes the current course error |
 | Direct-bank limit | 25° |
 | Direct-bank slew | 6°/s |
-| Direct-bank filter / deadband | 0.10 s; 0.5° / 0.02 NM |
+| Direct-bank filter / deadband | 0.08 s; 0.5° / 0.02 NM |
 | Direct-bank track-rate damping | 0.5° per °/s, max 6° |
 | VNAV pitch correction | ±2.5° |
 | VNAV pitch rate | 3°/s |

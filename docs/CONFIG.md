@@ -58,7 +58,7 @@ lnav_bank_max_deg=25
 lnav_bank_rate_deg_s=6
 lnav_bank_deadband_deg=0.5
 lnav_bank_deadband_nm=0.02
-lnav_bank_filter_tau_s=0.10
+lnav_bank_filter_tau_s=0.08
 lnav_bank_track_rate_damp=0.5
 
 vnav_vs_gain=1.2
@@ -139,7 +139,7 @@ debug=0
 | `lnav_bank_rate_deg_s` | Direct-bank command slew rate | 6°/s default. Raise if the FD roll target lags the turn (the AP's own roll rate is the final limit); lower if the roll is too abrupt |
 | `lnav_bank_deadband_deg` | Track-error deadband | 0.5° default; below this, and within the cross-track deadband, the bank target is zero to avoid chasing turbulence |
 | `lnav_bank_deadband_nm` | Cross-track deadband | 0.02 NM default |
-| `lnav_bank_filter_tau_s` | Direct-bank command low-pass | 0.10 s default; raise to 0.2–0.3 for smoother tracking in continuous turbulence, lower to 0.05 for crisper response |
+| `lnav_bank_filter_tau_s` | Direct-bank command low-pass | 0.08 s default; raise to 0.15–0.3 for smoother tracking in continuous turbulence, lower to 0.05 for crisper response |
 | `lnav_bank_track_rate_damp` | Track-rate damping | 0.5 default (degrees of bank per deg/s of track rate, capped at 6°). Trims bank as the turn rate develops so a large capture does not hold 25° past the course; raise to 1.2–1.5 for more damping, 0 to disable |
 
 ### VNAV

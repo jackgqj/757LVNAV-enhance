@@ -27,13 +27,13 @@ RNAV1 direct-bank lateral mode.  Bilingual release notes:
   producing a 15-20 deg opposing command at short look-ahead and rolling the
   wings back while only halfway through the turn; it is now applied only
   outside the fly-by arc.
-- Direct bank has a small track/cross-track deadband and a 0.10 s command
+- Direct bank has a small track/cross-track deadband and a 0.08 s command
   filter (`lnav_bank_deadband_deg`, `lnav_bank_deadband_nm`,
   `lnav_bank_filter_tau_s`) so instantaneous track jitter in turbulence is not
   fed straight into the FD roll target.
 - Added mild track-rate damping (`lnav_bank_track_rate_damp=0.5`, capped ±6°)
   so a large direct-bank capture does not hold 25° past the course and then
-  reverse.  The filter default is 0.10 s.
+  reverse.  The filter default is 0.08 s.
 - RF legs now bypass the sticky turn latch entirely: no latch onto an RF leg
   and no carrying a pre-RF leg across an RF leg.  Ordinary LNAV leg latching is
   unchanged.  RF centre, radius, turn and sweep geometry are unchanged.
@@ -43,7 +43,21 @@ RNAV1 direct-bank lateral mode.  Bilingual release notes:
   second guard.  This fixes the IDBON heading lock where a left RF
   feed-forward held the wings while the target course was to the right and the
   trend state had just reset.  RF centre/radius/turn geometry is unchanged.
-- Tests: bank 8, procedure 25, procedure-route 16, guidance 223, CDU 48,
+- CIFP overlay performance: a successful merge is now cached for the lifetime
+  of its route signature.  Only failed detections retry on the 5 s timer,
+  removing the periodic detect/build/merge hitch during departure.
+- CDU route dirty check: when the CDU content/active index is unchanged, the
+  full route snapshot is no longer copied every frame; the CIFP-merged route is
+  kept in place.
+- VNAV profile before-TOD hold is no longer gated on `|VS| < 200`.  A
+  non-zero vertical speed used to let a backwards-extrapolated path altitude
+  (e.g. 65540 ft) become the PTH target; the target now stays at the aircraft
+  altitude until the path intercepts.
+- FMS direct-to detection: when the CDI course is the bearing from the
+  aircraft to the active fix and differs from the old fix-to-fix leg, guidance
+  follows that bearing with zero cross-track instead of applying a 30 deg
+  intercept to the previous leg.
+- Tests: bank 8, procedure 25, procedure-route 16, guidance 229, CDU 48,
   CIFP 21.
 
 ## 1.2.36+vnav-profile+lnav-turn+cifp-nav — 2026-11-12
